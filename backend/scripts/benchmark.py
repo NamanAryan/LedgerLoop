@@ -299,9 +299,21 @@ def render(results: list[RunResult], args: argparse.Namespace, ceiling: float) -
         "",
         f"- API base URL: `{args.base_url}`",
         "- Stack: `docker compose up -d --build` (postgres:15-alpine, redis:7-alpine,",
-        "  one API container, one worker container running matcher + relay + sweeper).",
-        "- The generator runs on the host, so ingest latency includes the Docker port",
-        "  mapping hop. Numbers are comparative across rates, not absolute hardware claims.",
+        f"  {args.api_replicas} API uvicorn worker(s), {args.worker_replicas} matcher"
+        " container(s) running matcher + relay + sweeper).",
+        f"- Unmatched sweep window: **{args.sweep_window_s:g}s**. This must exceed match",
+        "  p99, or the sweeper reaches a row before the matcher does and reports a",
+        "  counterparty that did arrive as an unmatched break.",
+        # Derived, not asserted: the same harness is run both ways, and stating the
+        # wrong one silently reframes what the ingest latency column measures.
+        (
+            "- The generator runs inside the compose network, so ingest latency excludes"
+            "\n  the Docker published-port hop."
+            if "//api:" in args.base_url
+            else "- The generator runs on the host, so ingest latency includes the Docker"
+            "\n  port mapping hop."
+        ),
+        "  Numbers are comparative across rates, not absolute hardware claims.",
         "",
         "## Reproducing",
         "",
@@ -340,6 +352,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260818)
     parser.add_argument("--settle-timeout", type=float, default=180.0)
     parser.add_argument("--out", default="BENCHMARKS.md")
+    # Recorded in the generated document, not enforced by it. The harness drives the
+    # stack over HTTP and cannot see how it was scaled, so these describe the run for
+    # the reader; they must match how the stack was actually brought up.
+    parser.add_argument("--api-replicas", type=int, default=1)
+    parser.add_argument("--worker-replicas", type=int, default=1)
+    parser.add_argument(
+        "--sweep-window-s",
+        type=float,
+        default=300.0,
+        help="the worker's LEDGERLOOP_UNMATCHED_AFTER_S, for the report",
+    )
     return parser.parse_args(argv)
 
 

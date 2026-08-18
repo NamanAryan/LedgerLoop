@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, PostgresDsn, RedisDsn
+from pydantic import Field, PostgresDsn, RedisDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -75,6 +75,26 @@ class Settings(BaseSettings):
     #: container count; this exists to use a single container's connection pool fully.
     worker_concurrency: int = 1
     worker_metrics_port: int = 9100
+
+    # --- API edge ---------------------------------------------------------
+    #: Browser origins allowed to call the read path. The dashboard is served from a
+    #: different origin than the API in every deployment shape we support (Vite on
+    #: :5173 locally, a static host in production), so CORS is not optional. Listed
+    #: explicitly rather than "*": the read path is not public data, and a wildcard
+    #: would also forbid credentialed requests if auth is ever added.
+    cors_origins: list[str] = Field(
+        default=["http://localhost:5173", "http://127.0.0.1:5173"],
+        description="Comma-separated in the environment; JSON list also accepted.",
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_origins(cls, value: object) -> object:
+        # pydantic-settings parses list fields as JSON. Accept the plain
+        # comma-separated form too, because that is what a Railway env var looks like.
+        if isinstance(value, str) and not value.strip().startswith("["):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     # --- Observability ----------------------------------------------------
     log_level: str = "INFO"

@@ -18,6 +18,7 @@ from typing import Literal
 
 from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from ledgerloop.db.enums import ReconStatus
 from ledgerloop.db.models import Exception_, ReconciliationResult
@@ -110,7 +111,18 @@ async def fetch_results_page(
         stmt = stmt.where(ReconciliationResult.status == status)
     stmt = _apply_keyset(stmt, ReconciliationResult.id, cursor, limit)
 
-    rows = list((await session.execute(stmt)).scalars().all())
+    # Both sides come back with the page. The relationships are lazy="raise", so
+    # without this the response serialiser would raise rather than silently emit N+1
+    # queries -- the mapper is configured to make the accident impossible and the
+    # intent explicit. LEFT OUTER (innerjoin=False) is required, not incidental: an
+    # unmatched result has exactly one side by definition, and an inner join would
+    # drop every break from the feed -- the rows an operator most needs to see.
+    stmt = stmt.options(
+        joinedload(ReconciliationResult.gateway_txn),
+        joinedload(ReconciliationResult.ledger_entry),
+    )
+
+    rows = list((await session.execute(stmt)).unique().scalars().all())
     if len(rows) > limit:
         return rows[:limit], rows[limit - 1].id
     return rows, None

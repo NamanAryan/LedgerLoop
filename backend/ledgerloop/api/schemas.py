@@ -124,6 +124,23 @@ class ReconciliationResultOut(BaseModel):
     match_latency_ms: int | None
     notes: str | None
 
+    # Denormalised onto the response, not the table. The dashboard has to render the
+    # business identifier and both amounts side by side to show a drift break, and
+    # without these it would need one extra request per row to be readable at all.
+    # Served by a join on the page of rows already being fetched -- see
+    # fetch_results_page() -- so it costs one query, not N.
+    txn_id: str | None = None
+    currency: str | None = None
+    gateway_amount: MoneyField | None = None
+    ledger_amount: MoneyField | None = None
+
+    @property
+    def amount_delta(self) -> Decimal | None:
+        """Ledger minus gateway; None unless both sides exist."""
+        if self.gateway_amount is None or self.ledger_amount is None:
+            return None
+        return self.ledger_amount - self.gateway_amount
+
 
 class TransactionPage(BaseModel):
     """Keyset page. ``next_cursor`` is None exactly when the feed is exhausted."""

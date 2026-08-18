@@ -287,3 +287,62 @@ async def test_time_drift_does_not_create_an_exception(api, sessions, stream, se
     await ingest_pair(api, "TXN-NOEX", skew=timedelta(seconds=30))
     await run_pipeline(sessions, stream, settings)
     assert (await api.get("/v1/exceptions")).json()["items"] == []
+
+
+# --- feed enrichment (dashboard rendering) ---------------------------------
+async def test_feed_carries_both_amounts_and_the_business_id(api, sessions, stream, settings):
+    """The dashboard renders a drift break without a second request per row."""
+    await ingest_pair(api, "TXN-ENR", gateway_amount="1000.00", ledger_amount="1005.00")
+    await run_pipeline(sessions, stream, settings)
+
+    item = (await api.get("/v1/transactions")).json()["items"][0]
+    assert item["txn_id"] == "TXN-ENR"
+    assert item["currency"] == "INR"
+    assert item["gateway_amount"] == "1000.00"
+    assert item["ledger_amount"] == "1005.00"
+
+
+async def test_feed_matched_row_reports_equal_amounts(api, sessions, stream, settings):
+    await ingest_pair(api, "TXN-EQ", gateway_amount="250.00")
+    await run_pipeline(sessions, stream, settings)
+
+    item = (await api.get("/v1/transactions")).json()["items"][0]
+    assert item["gateway_amount"] == item["ledger_amount"] == "250.00"
+
+
+async def test_feed_unmatched_row_has_one_side_null(api, sessions, settings, session):
+    """An unmatched break has no counterparty; the missing side must serialise as null
+    rather than dropping the row from the feed entirely."""
+    await post_gateway(api, gateway_payload("TXN-ONLY"))
+    await _age_rows(session)
+    await Sweeper(sessions, settings).sweep_once()
+
+    items = (await api.get("/v1/transactions")).json()["items"]
+    row = next(item for item in items if item["txn_id"] == "TXN-ONLY")
+    assert row["status"] == "unmatched_gateway_only"
+    assert row["gateway_amount"] == "1000.00"
+    assert row["ledger_amount"] is None
+
+
+async def test_feed_page_costs_one_query_regardless_of_size(api, sessions, stream, settings):
+    """Guards the N+1 the joinedload exists to prevent: lazy="raise" on both
+    relationships turns an accidental lazy load into an error, not a slow page."""
+    for index in range(10):
+        await ingest_pair(api, f"TXN-N1-{index}")
+    await run_pipeline(sessions, stream, settings)
+
+    response = await api.get("/v1/transactions", params={"limit": 10})
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 10
+
+
+# --- CORS -------------------------------------------------------------------
+async def test_cors_allows_the_dashboard_origin(api):
+    response = await api.get("/v1/stats", headers={"Origin": "http://localhost:5173"})
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+async def test_cors_omits_headers_for_an_unlisted_origin(api):
+    response = await api.get("/v1/stats", headers={"Origin": "http://evil.example"})
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers

@@ -1,0 +1,44 @@
+# Fly.io deployment for the API. The worker is a second app (see fly.worker.toml):
+# they scale on different signals -- the API on request rate, the matcher on stream
+# depth -- and one process group could not express that.
+app = "ledgerloop"
+primary_region = "sin"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[deploy]
+  # Runs once per deploy, before the new machines take traffic, and blocks the
+  # release if it fails. This is the Fly equivalent of compose's one-shot migrate
+  # service: migrations must never race N starting API machines.
+  release_command = "alembic upgrade head"
+
+[env]
+  LEDGERLOOP_LOG_JSON = "true"
+  # Neither the relay nor the sweeper belongs in the API process: both are
+  # background loops, and running them per-API-machine would multiply the work.
+  LEDGERLOOP_ENABLE_RELAY = "false"
+  LEDGERLOOP_ENABLE_SWEEPER = "false"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Scale to zero is deliberately off. A cold start would have to rebuild the
+  # connection pool before answering, and the dashboard polls every 3s anyway,
+  # so the machine would never actually idle.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    # /ready, not /health: this gates traffic, so it must fail when Postgres or
+    # Redis is unreachable. /health would happily accept traffic the app cannot serve.
+    path = "/ready"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

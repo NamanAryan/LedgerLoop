@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from ledgerloop.api import routes_ingest, routes_ops, routes_read
 from ledgerloop.config import Settings, get_settings
@@ -60,6 +61,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "reconciles them asynchronously, and reports matches, drift, and breaks."
         ),
         lifespan=lifespan,
+    )
+    # Read-only GETs plus one POST (exception resolve), so the preflight surface is
+    # small. Credentials are off: there is no cookie session to protect, and leaving
+    # them on would rule out the wildcard fallback a self-hosted deployment may want.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
     )
     app.include_router(routes_ingest.router)
     app.include_router(routes_read.router)

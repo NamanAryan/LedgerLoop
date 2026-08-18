@@ -43,7 +43,7 @@ services:
   # they would race each other on startup, and Alembic takes no lock that would make
   # that safe. A dedicated service that must exit 0 before anything else starts does.
   migrate:
-    build: .
+    build: ./backend
     command: ["alembic", "upgrade", "head"]
     environment:
       LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
@@ -54,7 +54,7 @@ services:
     restart: "no"
 
   api:
-    build: .
+    build: ./backend
     # Ingestion is CPU-bound per process (see BENCHMARKS.md): one uvicorn worker tops
     # out well below what Postgres can absorb, so the scaling lever is process count.
     #   API_WORKERS=4 docker compose up -d api
@@ -87,7 +87,7 @@ services:
       retries: 10
 
   worker:
-    build: .
+    build: ./backend
     command: ["python", "-m", "ledgerloop.worker.main"]
     environment:
       LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
@@ -121,7 +121,7 @@ services:
   # numbers would measure Docker Desktop's port forwarder rather than LedgerLoop.
   #   docker compose --profile bench run --rm bench
   bench:
-    build: .
+    build: ./backend
     profiles: ["bench"]
     environment:
       LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop

@@ -1,0 +1,20 @@
+# The matcher worker. No [http_service]: it serves no HTTP traffic, it consumes a
+# Redis Stream. Scaling it is `fly scale count N` -- the consumer group handles the
+# coordination, so N workers never double-process a message.
+app = "ledgerloop-worker"
+primary_region = "sin"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[processes]
+  worker = "python -m ledgerloop.worker.main"
+
+[env]
+  LEDGERLOOP_LOG_JSON = "true"
+  LEDGERLOOP_ENABLE_RELAY = "true"
+  LEDGERLOOP_ENABLE_SWEEPER = "true"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
