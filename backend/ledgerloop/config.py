@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # XADD MAXLEN ~ cap. The stream is a transport, not storage; Postgres is the record.
     stream_maxlen: int = 1_000_000
 
+    # How long an entry may sit unacked before another consumer may claim it.
+    # Must comfortably exceed the time to process one message, or healthy workers
+    # steal each other's in-flight work.
+    claim_min_idle_ms: int = 30_000
+    claim_interval_s: float = 10.0
+
     # --- Outbox relay ---------------------------------------------------
     outbox_batch_size: int = 500
     outbox_poll_interval_s: float = 0.2
@@ -58,6 +64,17 @@ class Settings(BaseSettings):
 
     # --- Ingestion limits -------------------------------------------------
     ledger_batch_max: int = 1_000
+
+    # --- Worker process ---------------------------------------------------
+    # The relay and sweeper ride along in the worker container by default. Both can be
+    # switched off so they can be run as their own deployments instead; nothing in
+    # either depends on being co-located with the matcher.
+    enable_relay: bool = True
+    enable_sweeper: bool = True
+    #: Matcher consume loops inside one worker process. Horizontal scaling is by
+    #: container count; this exists to use a single container's connection pool fully.
+    worker_concurrency: int = 1
+    worker_metrics_port: int = 9100
 
     # --- Observability ----------------------------------------------------
     log_level: str = "INFO"

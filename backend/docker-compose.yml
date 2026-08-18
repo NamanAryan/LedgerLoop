@@ -1,4 +1,9 @@
-# Local dev stack. API and worker services join in M1/M2 as their entry points land.
+# Local dev stack: postgres + redis + migrations + api + matcher worker.
+#
+# The worker is its own service, not a thread inside the API. That is the architectural
+# claim this file makes concrete: `docker compose up --scale worker=3` gives three
+# matchers coordinating through one Redis consumer group, with no config change and no
+# code change, and a slow matcher never slows down a webhook response.
 services:
   postgres:
     image: postgres:15-alpine
@@ -11,8 +16,8 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # Gates the api/worker services: they must not start against a DB that is
-      # still initialising, or their first migration/connection races the bootstrap.
+      # Gates every dependent service: they must not start against a database that is
+      # still bootstrapping, or the first connection races initdb.
       test: ["CMD-SHELL", "pg_isready -U ledgerloop -d ledgerloop"]
       interval: 2s
       timeout: 3s
@@ -20,9 +25,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    # appendonly: the stream is a transport, but an unclean restart that loses
-    # in-flight entries would mean rows sitting in Postgres with no matcher ever
-    # seeing them. The outbox would eventually republish, but AOF makes that rare.
+    # appendonly: the stream is a transport and Postgres is the record, but an unclean
+    # restart that drops in-flight entries would leave committed rows waiting on the
+    # sweeper instead of being matched in milliseconds.
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
@@ -33,6 +38,109 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  # One-shot. Migrations do not run from the API container: with several API replicas
+  # they would race each other on startup, and Alembic takes no lock that would make
+  # that safe. A dedicated service that must exit 0 before anything else starts does.
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
+      LEDGERLOOP_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    # Ingestion is CPU-bound per process (see BENCHMARKS.md): one uvicorn worker tops
+    # out well below what Postgres can absorb, so the scaling lever is process count.
+    #   API_WORKERS=4 docker compose up -d api
+    command:
+      - uvicorn
+      - ledgerloop.api.app:app
+      - --host=0.0.0.0
+      - --port=8000
+      - --workers=${API_WORKERS:-1}
+    environment:
+      LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
+      LEDGERLOOP_REDIS_URL: redis://redis:6379/0
+      LEDGERLOOP_LOG_JSON: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness, not readiness: this decides whether to restart the container, and a
+      # brief database blip is not a reason to restart every API replica at once.
+      test:
+        ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    command: ["python", "-m", "ledgerloop.worker.main"]
+    environment:
+      LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
+      LEDGERLOOP_REDIS_URL: redis://redis:6379/0
+      LEDGERLOOP_LOG_JSON: "true"
+      LEDGERLOOP_ENABLE_RELAY: "true"
+      LEDGERLOOP_ENABLE_SWEEPER: "true"
+      # Production defaults, overridable from the host for benchmarking: a 5-minute
+      # unmatched window is correct in production and unusable in a 30-second run.
+      #   LEDGERLOOP_UNMATCHED_AFTER_S=20 docker compose up -d worker
+      LEDGERLOOP_UNMATCHED_AFTER_S: "${LEDGERLOOP_UNMATCHED_AFTER_S:-300}"
+      LEDGERLOOP_SWEEP_INTERVAL_S: "${LEDGERLOOP_SWEEP_INTERVAL_S:-30}"
+    ports:
+      # A range, not a single port, so `docker compose up --scale worker=3` actually
+      # works instead of failing on a host port collision.
+      - "9100-9109:9100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # SIGTERM is handled: the worker finishes and acks the message in hand, then exits.
+    # 30s is generous headroom for that, and Docker's default 10s is not.
+    stop_grace_period: 30s
+
+  # Benchmarks run *inside* the compose network, not from the host. On Windows and
+  # macOS the Docker published-port path is the bottleneck long before the engine is:
+  # a dependency-free GET /health tops out around 80 req/s through it, so host-side
+  # numbers would measure Docker Desktop's port forwarder rather than LedgerLoop.
+  #   docker compose --profile bench run --rm bench
+  bench:
+    build: .
+    profiles: ["bench"]
+    environment:
+      LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
+      LEDGERLOOP_REDIS_URL: redis://redis:6379/0
+    command:
+      - python
+      - -m
+      - scripts.benchmark
+      - --base-url=http://api:8000
+      - --database-url=postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
+      - --redis-url=redis://redis:6379/0
+      - --out=/out/BENCHMARKS.md
+    volumes:
+      # Only the output path is mounted; mounting the project over /app would shadow
+      # the image's virtualenv.
+      - ./:/out
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -15,13 +15,15 @@ dependencies = [
     "prometheus-client>=0.21.0",
     "structlog>=24.4.0",
     "orjson>=3.10.0",
+    # Runtime, not dev: scripts/generate_load.py and scripts/benchmark.py ship inside
+    # the image and drive the API over HTTP.
+    "httpx>=0.28.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
-    "httpx>=0.28.0",
     "testcontainers[postgres,redis]>=4.8.0",
     "psycopg[binary]>=3.2.0",
     "ruff>=0.8.0",
@@ -39,6 +41,9 @@ packages = ["ledgerloop"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning:ledgerloop.*"]
+markers = [
+    "slow: end-to-end runs that start a real server and take tens of seconds",
+]
 
 [tool.ruff]
 line-length = 100
