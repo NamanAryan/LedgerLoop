@@ -1,0 +1,39 @@
+# Local dev stack. API and worker services join in M1/M2 as their entry points land.
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ledgerloop
+      POSTGRES_PASSWORD: ledgerloop
+      POSTGRES_DB: ledgerloop
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Gates the api/worker services: they must not start against a DB that is
+      # still initialising, or their first migration/connection races the bootstrap.
+      test: ["CMD-SHELL", "pg_isready -U ledgerloop -d ledgerloop"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    # appendonly: the stream is a transport, but an unclean restart that loses
+    # in-flight entries would mean rows sitting in Postgres with no matcher ever
+    # seeing them. The outbox would eventually republish, but AOF makes that rare.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
+  redisdata:
