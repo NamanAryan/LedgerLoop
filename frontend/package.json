@@ -1,0 +1,27 @@
+{
+  "name": "ledgerloop-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "verify": "esbuild scripts/verify-engine.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/verify-engine.mjs --log-level=warning && node node_modules/.cache/verify-engine.mjs",
+    "smoke": "esbuild scripts/smoke-render.tsx --bundle --platform=node --format=esm --jsx=automatic --packages=external --outfile=node_modules/.cache/smoke-render.mjs --log-level=warning && node node_modules/.cache/smoke-render.mjs",
+    "check": "npm run typecheck && npm run verify && npm run smoke",
+    "samples": "esbuild scripts/make-samples.ts --bundle --platform=node --format=esm --packages=external --outfile=node_modules/.cache/make-samples.mjs --log-level=warning && node node_modules/.cache/make-samples.mjs"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

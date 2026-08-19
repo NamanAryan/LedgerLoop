@@ -65,7 +65,10 @@ async def get_stats(
         window=window,
         window_seconds=seconds,
         matched=row.matched,
+        matched_via_time_drift=row.via_time_drift,
         unmatched=row.unmatched,
+        unmatched_gateway_only=row.unmatched_gateway,
+        unmatched_ledger_only=row.unmatched_ledger,
         duplicates=row.duplicates,
         drift=row.drift,
         total=total,
@@ -125,6 +128,9 @@ def _result_out(row) -> ReconciliationResultOut:  # type: ignore[no-untyped-def]
 
 
 def _exception_out(exc, result) -> ExceptionOut:  # type: ignore[no-untyped-def]
+    gateway = result.gateway_txn
+    ledger = result.ledger_entry
+    present = gateway or ledger
     return ExceptionOut(
         id=exc.id,
         reconciliation_result_id=exc.reconciliation_result_id,
@@ -136,6 +142,10 @@ def _exception_out(exc, result) -> ExceptionOut:  # type: ignore[no-untyped-def]
         gateway_txn_id=result.gateway_txn_id,
         ledger_entry_id=result.ledger_entry_id,
         notes=result.notes,
+        txn_id=present.txn_id if present else None,
+        currency=present.currency if present else None,
+        gateway_amount=gateway.amount if gateway else None,
+        ledger_amount=ledger.amount if ledger else None,
     )
 
 

@@ -142,6 +142,17 @@ services:
       api:
         condition: service_healthy
 
+  # The ops console: three static files behind nginx, which also reverse-proxies /v1 to
+  # the API. Serving both from one origin is what lets the console ship with no API base
+  # URL and no CORS involvement -- see frontend/nginx.conf.
+  dashboard:
+    build: ./frontend
+    ports:
+      - "5173:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:

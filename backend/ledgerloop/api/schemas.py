@@ -164,6 +164,14 @@ class ExceptionOut(BaseModel):
     ledger_entry_id: int | None
     notes: str | None
 
+    # Same enrichment, and for the same reason, as ReconciliationResultOut: an
+    # operator resolving a break needs the transaction and the two amounts, not a
+    # pair of foreign keys. Joined onto the page already being fetched.
+    txn_id: str | None = None
+    currency: str | None = None
+    gateway_amount: MoneyField | None = None
+    ledger_amount: MoneyField | None = None
+
 
 class ExceptionPage(BaseModel):
     items: list[ExceptionOut]
@@ -186,7 +194,13 @@ class StatsOut(BaseModel):
     window: Literal["1h", "24h", "7d"]
     window_seconds: int
     matched: int
+    #: Of ``matched``, how many needed the fuzzy-time layer rather than an exact hit.
+    #: Not a separate bucket -- a subset, so it must never be added to ``matched``.
+    matched_via_time_drift: int
     unmatched: int
+    #: ``unmatched`` split by which side was missing. The two sum to ``unmatched``.
+    unmatched_gateway_only: int
+    unmatched_ledger_only: int
     duplicates: int
     drift: int
     total: int = Field(description="Active results in the window; duplicates excluded.")

@@ -9,7 +9,7 @@ from sqlalchemy import func, update
 
 from ledgerloop.db.models import GatewayTransaction, LedgerEntry
 from ledgerloop.worker.sweeper import Sweeper
-from tests.helpers import gateway_payload, ingest_pair, post_gateway
+from tests.helpers import gateway_payload, ingest_pair, ledger_payload, post_gateway, post_ledger
 from tests.pipeline import run_pipeline
 
 
@@ -346,3 +346,80 @@ async def test_cors_omits_headers_for_an_unlisted_origin(api):
     response = await api.get("/v1/stats", headers={"Origin": "http://evil.example"})
     assert response.status_code == 200
     assert "access-control-allow-origin" not in response.headers
+
+
+# --- stats breakdown (ops console tiles) -----------------------------------
+async def test_stats_splits_unmatched_by_side(api, sessions, settings, session):
+    """"46 unmatched" and "31 gateway-only, 15 ledger-only" answer different
+    questions; the second is what tells an operator which side stopped posting."""
+    await post_gateway(api, gateway_payload("TXN-GWO"))
+    await post_ledger(api, ledger_payload("TXN-LDO"))
+    await _age_rows(session)
+    await Sweeper(sessions, settings).sweep_once()
+
+    body = (await api.get("/v1/stats")).json()
+    assert body["unmatched_gateway_only"] == 1
+    assert body["unmatched_ledger_only"] == 1
+    # The split must reconcile with the total it decomposes.
+    assert body["unmatched_gateway_only"] + body["unmatched_ledger_only"] == body["unmatched"]
+
+
+async def test_stats_counts_matches_that_needed_the_time_layer(api, sessions, stream, settings):
+    await ingest_pair(api, "TXN-EXACT")
+    await ingest_pair(api, "TXN-LATE", skew=timedelta(seconds=40))
+    await run_pipeline(sessions, stream, settings)
+
+    body = (await api.get("/v1/stats")).json()
+    assert body["matched"] == 2
+    # A subset of matched, never an addition to it.
+    assert body["matched_via_time_drift"] == 1
+    assert body["matched_via_time_drift"] <= body["matched"]
+
+
+async def test_stats_time_drift_count_is_zero_when_clocks_agree(api, sessions, stream, settings):
+    await ingest_pair(api, "TXN-SYNC")
+    await run_pipeline(sessions, stream, settings)
+
+    body = (await api.get("/v1/stats")).json()
+    assert body["matched"] == 1
+    assert body["matched_via_time_drift"] == 0
+
+
+# --- exception enrichment ---------------------------------------------------
+async def test_exception_queue_carries_the_amounts_under_review(api, sessions, stream, settings):
+    """An operator cannot judge a drift break from a pair of foreign keys."""
+    await ingest_pair(api, "TXN-EXC", gateway_amount="1000.00", ledger_amount="1005.00")
+    await run_pipeline(sessions, stream, settings)
+
+    item = (await api.get("/v1/exceptions", params={"status": "open"})).json()["items"][0]
+    assert item["txn_id"] == "TXN-EXC"
+    assert item["gateway_amount"] == "1000.00"
+    assert item["ledger_amount"] == "1005.00"
+    assert item["currency"] == "INR"
+
+
+async def test_resolved_exception_response_keeps_the_enrichment(api, sessions, stream, settings):
+    await ingest_pair(api, "TXN-RES", gateway_amount="1000.00", ledger_amount="1005.00")
+    await run_pipeline(sessions, stream, settings)
+    opened = (await api.get("/v1/exceptions", params={"status": "open"})).json()["items"][0]
+
+    resolved = await api.post(
+        f"/v1/exceptions/{opened['id']}/resolve",
+        json={"resolution_notes": "fee rounding, accepted"},
+    )
+    body = resolved.json()
+    assert resolved.status_code == 200
+    assert body["closed_at"] is not None
+    assert body["txn_id"] == "TXN-RES"
+    assert body["gateway_amount"] == "1000.00"
+
+
+async def test_one_sided_exception_reports_the_missing_side_as_null(api, sessions, settings, session):
+    await post_gateway(api, gateway_payload("TXN-ONESIDE"))
+    await _age_rows(session)
+    await Sweeper(sessions, settings).sweep_once()
+
+    item = (await api.get("/v1/exceptions", params={"status": "open"})).json()["items"][0]
+    assert item["txn_id"] == "TXN-ONESIDE"
+    assert item["gateway_amount"] == "1000.00"
+    assert item["ledger_amount"] is None

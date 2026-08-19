@@ -20,7 +20,7 @@ from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from ledgerloop.db.enums import ReconStatus
+from ledgerloop.db.enums import MatchLayer, ReconStatus
 from ledgerloop.db.models import Exception_, ReconciliationResult
 
 WindowName = Literal["1h", "24h", "7d"]
@@ -35,6 +35,9 @@ _DRIFT = (ReconStatus.AMOUNT_DRIFT, ReconStatus.TIME_DRIFT)
 class StatsRow:
     matched: int
     unmatched: int
+    unmatched_gateway: int
+    unmatched_ledger: int
+    via_time_drift: int
     duplicates: int
     drift: int
     p50: float | None
@@ -61,6 +64,21 @@ async def fetch_stats(session: AsyncSession, window: WindowName) -> StatsRow:
     stmt = select(
         func.count().filter(ReconciliationResult.status == ReconStatus.MATCHED).label("matched"),
         func.count().filter(ReconciliationResult.status.in_(_UNMATCHED)).label("unmatched"),
+        # Split out because "46 unmatched" and "31 gateway-only, 15 ledger-only" are
+        # different operational stories: the first says reconciliation is imperfect,
+        # the second says which side stopped posting. Same scan, two more filters.
+        func.count()
+        .filter(ReconciliationResult.status == ReconStatus.UNMATCHED_GATEWAY_ONLY)
+        .label("unmatched_gateway"),
+        func.count()
+        .filter(ReconciliationResult.status == ReconStatus.UNMATCHED_LEDGER_ONLY)
+        .label("unmatched_ledger"),
+        # Matched, but only after the fuzzy-time layer. Keyed on match_layer rather
+        # than status precisely because these count as matches (see enums.py) -- this
+        # is the only way to see how much of the match rate leans on clock tolerance.
+        func.count()
+        .filter(ReconciliationResult.match_layer == MatchLayer.TIME_DRIFT)
+        .label("via_time_drift"),
         func.count().filter(ReconciliationResult.status == ReconStatus.DUPLICATE).label("dupes"),
         func.count().filter(ReconciliationResult.status.in_(_DRIFT)).label("drift"),
         func.percentile_cont(0.5).within_group(latency.asc()).filter(active).label("p50"),
@@ -80,6 +98,9 @@ async def fetch_stats(session: AsyncSession, window: WindowName) -> StatsRow:
     return StatsRow(
         matched=row.matched,
         unmatched=row.unmatched,
+        unmatched_gateway=row.unmatched_gateway,
+        unmatched_ledger=row.unmatched_ledger,
+        via_time_drift=row.via_time_drift,
         duplicates=row.dupes,
         drift=row.drift,
         p50=float(row.p50) if row.p50 is not None else None,
@@ -144,13 +165,20 @@ async def fetch_exceptions_page(
     stmt = select(Exception_, ReconciliationResult).join(
         ReconciliationResult, Exception_.reconciliation_result_id == ReconciliationResult.id
     )
+    # The raw sides ride along with the same statement. An exception exists to be
+    # judged by a human, and "result 41822 is in amount drift" is not something anyone
+    # can judge -- they need the two amounts that disagree and the transaction id.
+    stmt = stmt.options(
+        joinedload(ReconciliationResult.gateway_txn),
+        joinedload(ReconciliationResult.ledger_entry),
+    )
     if status == "open":
         stmt = stmt.where(Exception_.closed_at.is_(None))  # -> ix_exceptions_open_id
     elif status == "closed":
         stmt = stmt.where(Exception_.closed_at.is_not(None))  # -> ix_exceptions_closed_id
     stmt = _apply_keyset(stmt, Exception_.id, cursor, limit)
 
-    rows = [(row[0], row[1]) for row in (await session.execute(stmt)).all()]
+    rows = [(row[0], row[1]) for row in (await session.execute(stmt)).unique().all()]
     if len(rows) > limit:
         return rows[:limit], rows[limit - 1][0].id
     return rows, None
@@ -163,8 +191,12 @@ async def fetch_exception(
         select(Exception_, ReconciliationResult)
         .join(ReconciliationResult, Exception_.reconciliation_result_id == ReconciliationResult.id)
         .where(Exception_.id == exception_id)
+        .options(
+            joinedload(ReconciliationResult.gateway_txn),
+            joinedload(ReconciliationResult.ledger_entry),
+        )
     )
-    row = (await session.execute(stmt)).first()
+    row = (await session.execute(stmt)).unique().first()
     return (row[0], row[1]) if row else None
 
 
