@@ -5,98 +5,105 @@
  * question an operator asks first: a book that matches 99% at layer 1 is healthy,
  * and a book that matches 99% only after layer 2 rescues it has a clock problem
  * somewhere upstream. The layers run in order, each seeing only what the previous
- * one could not resolve, so the counts below are a decomposition of one stream
- * rather than five independent tallies.
+ * one could not resolve, so the counts below decompose one stream rather than
+ * tally five independent ones.
+ *
+ * The rule under each row is not decoration: its filled length is that layer's
+ * share of every decision the run made, so the five fills sum to the whole
+ * stream. The divider is the chart.
  */
 
 import { formatCount, formatPercent } from '../format'
 import type { ReconTotals } from '../engine/types'
+import { Numeral } from './primitives'
 
 interface Layer {
-  id: string
   name: string
   rule: string
   count: number
-  color: string
+  fill: string
 }
 
 export function LayerCascade({ totals }: { totals: ReconTotals }) {
   const layers: Layer[] = [
     {
-      id: 'L1',
       name: 'Exact',
-      rule: 'same amount, within 2s',
+      rule: 'Same amount, within two seconds',
       count: totals.matchedExact,
-      color: 'var(--ok)',
+      fill: 'bg-sage',
     },
     {
-      id: 'L2',
       name: 'Time drift',
-      rule: 'same amount, within 60s',
+      rule: 'Same amount, within sixty seconds',
       count: totals.matchedTimeDrift,
-      color: 'var(--ok)',
+      fill: 'bg-sage/60',
     },
     {
-      id: 'L3',
       name: 'Amount drift',
-      rule: 'inside tolerance, flagged',
+      rule: 'Inside tolerance, flagged for review',
       count: totals.amountDrift,
-      color: 'var(--bad)',
+      fill: 'bg-rose',
     },
     {
-      id: 'L4',
       name: 'Duplicate',
-      rule: 'repeat idempotency key',
+      rule: 'Repeat idempotency key',
       count: totals.duplicates,
-      color: 'var(--warn)',
+      fill: 'bg-gold',
     },
     {
-      id: 'L5',
       name: 'Sweep',
-      rule: 'no counterparty found',
+      rule: 'No counterparty found on either side',
       count: totals.unmatchedGateway + totals.unmatchedLedger,
-      color: 'var(--bad)',
+      fill: 'bg-rose/60',
     },
   ]
 
   const decided = layers.reduce((sum, layer) => sum + layer.count, 0)
+  let remaining = decided
 
   return (
-    <div className="cascade">
-      {layers.map((layer) => {
+    <div className="px-6 sm:px-8">
+      {layers.map((layer, index) => {
         const share = decided === 0 ? 0 : layer.count / decided
+        // What this layer was handed, before it took its cut.
+        const carriedIn = remaining
+        remaining -= layer.count
+
         return (
-          <div className="cascade-row" key={layer.id}>
-            <div className="cascade-label">
-              <b>{layer.id}</b>
-              {layer.name}
+          <div key={layer.name} className="relative py-6">
+            <div className="flex items-baseline justify-between gap-4">
+              <div className="flex items-baseline gap-5">
+                <Numeral n={index + 1} className="w-6 shrink-0" />
+                <h3 className="text-base font-normal tracking-tight text-cream">
+                  {layer.name}
+                </h3>
+              </div>
+              <div className="shrink-0 font-display text-2xl font-light leading-none text-cream">
+                {formatCount(layer.count)}
+              </div>
             </div>
+
+            <div className="mt-1.5 flex flex-col gap-0.5 pl-11 text-xs font-light text-slate sm:flex-row sm:items-baseline sm:justify-between sm:gap-8">
+              <p>
+                {layer.rule} · {formatCount(carriedIn)} reached this layer
+              </p>
+              <p className="shrink-0 sm:text-right">{formatPercent(share, 1)} of all rows</p>
+            </div>
+
+            {/* The row's own divider, filled to this layer's share. */}
             <div
-              className="cascade-track"
+              className="absolute inset-x-0 bottom-0 h-px overflow-hidden bg-line"
               role="img"
               aria-label={`${layer.name}: ${formatCount(layer.count)} rows, ${formatPercent(share, 1)} of all decisions`}
             >
-              {/* A layer that resolved nothing still shows a hairline, so the row
-                  reads as "zero" rather than as a rendering failure. */}
               <span
-                className="cascade-fill"
-                style={{
-                  width: layer.count === 0 ? '1px' : `${Math.max(share * 100, 0.4)}%`,
-                  background: layer.count === 0 ? 'var(--line-strong)' : layer.color,
-                }}
+                className={`block h-full transition-[width] duration-700 ease-refined ${layer.count === 0 ? 'bg-line-2' : layer.fill}`}
+                style={{ width: layer.count === 0 ? '2px' : `${Math.max(share * 100, 0.5)}%` }}
               />
-            </div>
-            <div className="cascade-meta">
-              {formatCount(layer.count)} <em>{formatPercent(share, 1)}</em>
             </div>
           </div>
         )
       })}
-      <div className="cascade-row" style={{ gridTemplateColumns: '1fr' }}>
-        <span className="field-hint" style={{ margin: 0 }}>
-          Layers run in order; each sees only what the one above it could not resolve.
-        </span>
-      </div>
     </div>
   )
 }

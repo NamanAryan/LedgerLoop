@@ -1,78 +1,68 @@
-/** Screen 2 — synthetic run controls. */
+/** The synthetic-run panel, shown on `/reconcile?mode=test`. */
 
-import {
-  LIMITS,
-  clampGeneratorConfig,
-  type GeneratorConfig,
-} from '../engine/generate'
-import type { MatchConfig } from '../engine/types'
+import { LIMITS, clampGeneratorConfig, type GeneratorConfig } from '../engine/generate'
+import { DEFAULT_MATCH_CONFIG } from '../engine/types'
 import { formatCount, formatDuration } from '../format'
-import { SliderField } from '../components/primitives'
+import {
+  Alert,
+  Button,
+  Eyebrow,
+  Panel,
+  PanelBody,
+  PanelHead,
+  Select,
+  SliderField,
+  TextInput,
+} from '../components/primitives'
 
 const CURRENCIES = ['INR', 'USD', 'EUR', 'GBP'] as const
 
-export function TestDataControls({
+export function TestDataPanel({
   config,
   onChange,
-  match,
   onRun,
   running,
-  onBack,
 }: {
   config: GeneratorConfig
   onChange: (next: GeneratorConfig) => void
-  match: MatchConfig
   onRun: () => void
   running: boolean
-  onBack: () => void
 }) {
   const set = <K extends keyof GeneratorConfig>(key: K, value: GeneratorConfig[K]) =>
     onChange(clampGeneratorConfig({ ...config, [key]: value }))
 
   const pct = (rate: number) => `${(rate * 100).toFixed(1)}%`
 
-  // Projected shape of the run, so the knobs have a consequence before the button is
-  // pressed. These are expectations, not results — the dashboard reports what the
-  // engine actually found.
+  // The projected shape of the run, so the knobs have a consequence before the
+  // button is pressed.
   const expectedLedgerRows = Math.round(config.count * (1 - config.dropRate))
   const expectedGatewayRows = config.count + Math.round(config.count * config.duplicateRate)
 
   // Skew is drawn around the mean with a 30% spread, so the tail crosses the drift
-  // window well before the mean does. Saying so beats letting the match rate collapse
-  // and look like a bug.
+  // window well before the mean does. Saying so beats letting the match rate
+  // collapse and look like a bug.
   const skewTail = config.timeSkewMs * 1.9
   const skewWarning =
-    skewTail > match.driftWindowMs
-      ? `Part of this spread lands beyond the ${formatDuration(match.driftWindowMs)} drift window, so those pairs will be reported unmatched on both sides. That is the engine refusing to guess, not a failure.`
+    skewTail > DEFAULT_MATCH_CONFIG.driftWindowMs
+      ? `Part of this spread falls outside the ${formatDuration(DEFAULT_MATCH_CONFIG.driftWindowMs)} drift window, so those pairs will come back unmatched.`
       : null
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Test data</h1>
-          <p className="page-sub">
-            Inject defects at known rates, then check the engine's counts against them.
-            The seed makes every run reproducible.
-          </p>
-        </div>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
-          ← Back
-        </button>
-      </div>
-
-      <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title">Stream shape</h2>
-          <span className="eyebrow">
-            {formatCount(expectedGatewayRows)} gateway · {formatCount(expectedLedgerRows)} ledger
-          </span>
-        </div>
-        <div className="panel-body">
-          <div className="controls">
+    <div className="space-y-8">
+      <Panel>
+        <PanelHead
+          title="Stream shape"
+          aside={
+            <Eyebrow>
+              {formatCount(expectedGatewayRows)} gateway ·{' '}
+              {formatCount(expectedLedgerRows)} ledger
+            </Eyebrow>
+          }
+        />
+        <PanelBody>
+          <div className="grid gap-x-12 gap-y-9 sm:grid-cols-2 lg:grid-cols-3">
             <SliderField
               label="Transactions"
-              hint="Pairs planned before duplicates are added."
               value={config.count}
               display={formatCount(config.count)}
               min={LIMITS.count.min}
@@ -83,7 +73,6 @@ export function TestDataControls({
             />
             <SliderField
               label="Drop rate"
-              hint="Gateway records whose ledger entry never arrives."
               value={config.dropRate}
               display={pct(config.dropRate)}
               min={LIMITS.rate.min}
@@ -94,7 +83,6 @@ export function TestDataControls({
             />
             <SliderField
               label="Duplicate rate"
-              hint="Gateway retries carrying an idempotency key already seen."
               value={config.duplicateRate}
               display={pct(config.duplicateRate)}
               min={LIMITS.rate.min}
@@ -105,7 +93,6 @@ export function TestDataControls({
             />
             <SliderField
               label="Amount drift rate"
-              hint="Ledger amounts off by 0.2–0.8%, inside the 1% tolerance band."
               value={config.driftRate}
               display={pct(config.driftRate)}
               min={LIMITS.rate.min}
@@ -116,7 +103,6 @@ export function TestDataControls({
             />
             <SliderField
               label="Time skew"
-              hint="Mean clock offset between the two sides, drawn with a 30% spread."
               value={config.timeSkewMs}
               display={`${formatCount(config.timeSkewMs)} ms`}
               min={LIMITS.timeSkewMs.min}
@@ -126,95 +112,45 @@ export function TestDataControls({
               disabled={running}
             />
 
-            <div className="field">
-              <div className="field-head">
-                <label className="eyebrow" htmlFor="seed">
-                  Seed
-                </label>
-              </div>
-              <input
+            <div>
+              <label htmlFor="seed" className="mb-3 block">
+                <Eyebrow>Seed</Eyebrow>
+              </label>
+              <TextInput
                 id="seed"
-                className="text-input"
                 type="number"
                 value={config.seed}
                 disabled={running}
-                onChange={(event) => set('seed', Number(event.target.value) || 0)}
+                onChange={(value) => set('seed', Number(value) || 0)}
               />
-              <p className="field-hint">
-                Same seed and knobs reproduce the same defects and the same verdicts.
-                Timestamps are anchored to the current time, so only they shift between runs.
-              </p>
             </div>
 
-            <div className="field">
-              <div className="field-head">
-                <label className="eyebrow" htmlFor="currency">
-                  Currency
-                </label>
-              </div>
-              <select
+            <div>
+              <label htmlFor="currency" className="mb-3 block">
+                <Eyebrow>Currency</Eyebrow>
+              </label>
+              <Select
                 id="currency"
-                className="select"
                 value={config.currency}
                 disabled={running}
-                onChange={(event) => set('currency', event.target.value)}
+                onChange={(value) => set('currency', value)}
               >
                 {CURRENCIES.map((code) => (
                   <option key={code} value={code}>
                     {code}
                   </option>
                 ))}
-              </select>
-              <p className="field-hint">Both sides use one currency in generated runs.</p>
+              </Select>
             </div>
           </div>
+        </PanelBody>
+      </Panel>
 
-          {skewWarning !== null && (
-            <div className="alert alert-warn" style={{ marginTop: 'calc(var(--u) * 5)' }}>
-              {skewWarning}
-            </div>
-          )}
-        </div>
-      </section>
+      {skewWarning !== null && <Alert tone="caution">{skewWarning}</Alert>}
 
-      <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title">Engine settings</h2>
-          <span className="eyebrow">fixed for this build</span>
-        </div>
-        <div className="panel-body">
-          <div className="controls">
-            <Readout label="Exact window" value={formatDuration(match.exactWindowMs)} hint="Layer 1" />
-            <Readout label="Drift window" value={formatDuration(match.driftWindowMs)} hint="Layers 2 and 3" />
-            <Readout
-              label="Amount tolerance"
-              value={`${(match.amountDriftBps / 100).toFixed(2)}%`}
-              hint={`or ${(match.amountDriftFloor / 100).toFixed(2)} ${config.currency}, whichever is larger`}
-            />
-          </div>
-        </div>
-      </section>
-
-      <div className="actions">
-        <button type="button" className="btn btn-primary" onClick={onRun} disabled={running}>
-          {running ? 'Reconciling…' : 'Generate & reconcile'}
-        </button>
-        <span className="field-hint" style={{ margin: 0 }}>
-          Runs off the main thread, so the page stays responsive at 50,000 rows.
-        </span>
-      </div>
-    </div>
-  )
-}
-
-function Readout({ label, value, hint }: { label: string; value: string; hint: string }) {
-  return (
-    <div className="field">
-      <div className="field-head">
-        <span className="eyebrow">{label}</span>
-        <span className="field-value">{value}</span>
-      </div>
-      <p className="field-hint">{hint}</p>
+      <Button variant="primary" onClick={onRun} disabled={running}>
+        {running ? 'Reconciling…' : 'Generate and reconcile'}
+      </Button>
     </div>
   )
 }

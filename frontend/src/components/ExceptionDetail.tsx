@@ -9,6 +9,7 @@
 import { formatMoney } from '../engine/money'
 import type { ReconRow, TxnFacts } from '../engine/types'
 import { formatSkew, formatTimestamp } from '../format'
+import { Button, Eyebrow, Select } from './primitives'
 
 export interface Resolution {
   reason: string
@@ -26,11 +27,11 @@ const REASONS = [
 ] as const
 
 const LAYER_COPY: Record<string, string> = {
-  exact: 'Layer 1 · exact',
-  time_drift: 'Layer 2 · time drift',
-  amount_drift: 'Layer 3 · amount drift',
-  duplicate: 'Layer 4 · duplicate',
-  unmatched_sweep: 'Layer 5 · unmatched sweep',
+  exact: 'Layer 1 · Exact',
+  time_drift: 'Layer 2 · Time drift',
+  amount_drift: 'Layer 3 · Amount drift',
+  duplicate: 'Layer 4 · Duplicate',
+  unmatched_sweep: 'Layer 5 · Unmatched sweep',
 }
 
 function SideRecord({
@@ -46,15 +47,14 @@ function SideRecord({
 }) {
   if (facts === null) {
     return (
-      <div className="detail-side">
-        <div className="detail-side-head">
-          <span className="eyebrow">{title}</span>
-          <span className="pill pill-unmatched">Absent</span>
+      <div className="rounded-lg border border-line p-6">
+        <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
+          <Eyebrow>{title}</Eyebrow>
+          <span className="inline-flex rounded-full border border-rose/30 bg-rose/10 px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-rose">
+            Absent
+          </span>
         </div>
-        <p className="detail-missing">
-          No record on this side. The break is the absence itself — there is nothing to
-          compare against.
-        </p>
+        <p className="text-sm font-light text-slate">No record on this side.</p>
       </div>
     )
   }
@@ -62,33 +62,46 @@ function SideRecord({
   const differs = (key: 'amount' | 'currency' | 'occurredAt') =>
     counterpart !== null && facts[key] !== counterpart[key]
 
+  /* A differing field is marked on the value itself. Highlighting the whole row
+     would make the operator hunt for the token that actually changed. */
+  const value = (changed: boolean) =>
+    changed
+      ? 'rounded-sm bg-rose/12 px-1.5 py-0.5 -mx-1.5 text-rose'
+      : 'text-cream'
+
   return (
-    <div className="detail-side">
-      <div className="detail-side-head">
-        <span className="eyebrow">{title}</span>
-        <span className="tcell-dim" style={{ fontSize: 11 }}>
-          row #{facts.rowId}
-        </span>
+    <div className="rounded-lg border border-line p-6">
+      <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
+        <Eyebrow>{title}</Eyebrow>
+        <span className="text-xs font-light text-slate">Row #{facts.rowId}</span>
       </div>
-      <dl className="kv">
-        <dt>txn_id</dt>
-        <dd>{facts.txnId}</dd>
+      <dl className="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-3 text-sm font-light">
+        <dt className="text-slate">Transaction</dt>
+        <dd className="m-0 break-words text-cream">{facts.txnId}</dd>
 
-        <dt>amount</dt>
-        <dd className={differs('amount') ? 'diff' : undefined}>
-          {formatMoney(facts.amount, currency)}
+        <dt className="text-slate">Amount</dt>
+        <dd className="m-0">
+          <span className={value(differs('amount'))}>
+            {formatMoney(facts.amount, currency)}
+          </span>
         </dd>
 
-        <dt>currency</dt>
-        <dd className={differs('currency') ? 'diff' : undefined}>{facts.currency}</dd>
-
-        <dt>timestamp</dt>
-        <dd className={differs('occurredAt') ? 'diff' : undefined}>
-          {formatTimestamp(facts.occurredAt)}
+        <dt className="text-slate">Currency</dt>
+        <dd className="m-0">
+          <span className={value(differs('currency'))}>{facts.currency}</span>
         </dd>
 
-        <dt>idem_key</dt>
-        <dd>{facts.idempotencyKey === '' ? '—' : facts.idempotencyKey}</dd>
+        <dt className="text-slate">Timestamp</dt>
+        <dd className="m-0">
+          <span className={value(differs('occurredAt'))}>
+            {formatTimestamp(facts.occurredAt)}
+          </span>
+        </dd>
+
+        <dt className="text-slate">Idempotency</dt>
+        <dd className="m-0 break-words text-cream">
+          {facts.idempotencyKey === '' ? '—' : facts.idempotencyKey}
+        </dd>
       </dl>
     </div>
   )
@@ -106,21 +119,21 @@ export function ExceptionDetail({
   const resolved = resolution.resolvedAt !== null
 
   return (
-    <div className="detail">
-      <div className="detail-reason">
-        <span className="eyebrow">Why it was flagged</span>
-        <p>
-          <strong className="mono">{LAYER_COPY[row.layer] ?? row.layer}</strong>
+    <div className="space-y-8 border-b border-line bg-ink-2 px-6 py-8 sm:px-8">
+      <div className="border-l-2 border-gold/70 pl-5">
+        <Eyebrow>Why it was flagged</Eyebrow>
+        <p className="mt-2 text-sm font-light leading-relaxed text-ash">
+          <span className="text-cream">{LAYER_COPY[row.layer] ?? row.layer}</span>
           {row.notes !== null && <> — {row.notes}</>}
         </p>
         {row.skewMs !== null && (
-          <p>
+          <p className="mt-1 text-sm font-light leading-relaxed text-ash">
             Ledger timestamp is {formatSkew(row.skewMs)} against the gateway.
           </p>
         )}
       </div>
 
-      <div className="detail-sides">
+      <div className="grid gap-4 lg:grid-cols-2">
         <SideRecord
           title="Gateway"
           facts={row.gateway}
@@ -135,60 +148,52 @@ export function ExceptionDetail({
         />
       </div>
 
-      <div className="resolve">
+      <div className="grid gap-6 lg:grid-cols-2">
         <div>
-          <label className="eyebrow" htmlFor={`reason-${row.id}`}>
-            Resolution
+          <label htmlFor={`reason-${row.id}`}>
+            <Eyebrow>Resolution</Eyebrow>
           </label>
-          <select
+          <Select
             id={`reason-${row.id}`}
-            className="select"
-            style={{ marginTop: 6 }}
+            className="mt-2.5"
             value={resolution.reason}
-            onChange={(event) => onChange({ ...resolution, reason: event.target.value })}
+            onChange={(reason) => onChange({ ...resolution, reason })}
           >
             {REASONS.map((reason) => (
               <option key={reason} value={reason}>
                 {reason}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div>
-          <label className="eyebrow" htmlFor={`note-${row.id}`}>
-            Notes
+          <label htmlFor={`note-${row.id}`}>
+            <Eyebrow>Notes</Eyebrow>
           </label>
           <textarea
             id={`note-${row.id}`}
-            style={{ marginTop: 6 }}
             placeholder="What you checked, what you found, what happens next."
             value={resolution.note}
             onChange={(event) => onChange({ ...resolution, note: event.target.value })}
+            className="mt-2.5 min-h-24 w-full resize-y rounded-md border border-line-2 bg-ink px-3.5 py-2.5 text-sm font-light leading-relaxed text-cream transition-colors duration-300 ease-refined placeholder:text-slate focus:border-gold/70 focus:outline-none"
           />
         </div>
+      </div>
 
-        <div className="resolve-row">
-          <button
-            type="button"
-            className={resolved ? 'btn btn-sm' : 'btn btn-sm btn-primary'}
-            onClick={() =>
-              onChange({ ...resolution, resolvedAt: resolved ? null : Date.now() })
-            }
-          >
-            {resolved ? 'Reopen' : 'Mark resolved'}
-          </button>
-          {resolved && resolution.resolvedAt !== null && (
-            <span className="resolved-flag">
-              Resolved {formatTimestamp(resolution.resolvedAt)} UTC
-            </span>
-          )}
-          {/* Said plainly rather than implied: this is a browser session, and
-              nothing here is written anywhere durable. */}
-          <span className="field-hint" style={{ margin: 0 }}>
-            Notes live in this browser session only — nothing is uploaded.
+      <div className="flex flex-wrap items-center gap-4">
+        <Button
+          size="sm"
+          variant={resolved ? 'outline' : 'primary'}
+          onClick={() => onChange({ ...resolution, resolvedAt: resolved ? null : Date.now() })}
+        >
+          {resolved ? 'Reopen' : 'Mark resolved'}
+        </Button>
+        {resolved && resolution.resolvedAt !== null && (
+          <span className="text-xs font-light text-sage">
+            Resolved {formatTimestamp(resolution.resolvedAt)} UTC
           </span>
-        </div>
+        )}
       </div>
     </div>
   )

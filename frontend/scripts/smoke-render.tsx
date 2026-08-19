@@ -10,10 +10,12 @@
  *   npm run smoke
  */
 
+import type { ReactNode } from 'react'
 import { renderToString } from 'react-dom/server'
+import { MemoryRouter } from 'react-router-dom'
 import { Landing } from '../src/screens/Landing'
-import { TestDataControls } from '../src/screens/TestDataControls'
-import { UploadMapping } from '../src/screens/UploadMapping'
+import { ChooseSource } from '../src/screens/ChooseSource'
+import { Reconcile } from '../src/screens/Reconcile'
 import { Dashboard } from '../src/screens/Dashboard'
 import { DEFAULT_GENERATOR_CONFIG, generate, toCsv } from '../src/engine/generate'
 import { reconcile } from '../src/engine/reconcile'
@@ -39,52 +41,18 @@ function check(name: string, run: () => string, mustContain: string[]) {
 
 const noop = () => {}
 
-console.log('\nscreens: render')
+/** Screens read the router (links, navigation), so each render needs one. */
+const at = (path: string, node: ReactNode) =>
+  renderToString(<MemoryRouter initialEntries={[path]}>{node}</MemoryRouter>)
 
-check(
-  'landing',
-  () => renderToString(<Landing onPickTestData={noop} onPickUpload={noop} />),
-  ['LedgerLoop', 'Try with test data', 'Upload your data', 'Match across 5 layers'],
-)
+console.log('\nroutes: render')
 
-check(
-  'test-data controls',
-  () =>
-    renderToString(
-      <TestDataControls
-        config={DEFAULT_GENERATOR_CONFIG}
-        onChange={noop}
-        match={DEFAULT_MATCH_CONFIG}
-        onRun={noop}
-        running={false}
-        onBack={noop}
-      />,
-    ),
-  ['Generate &amp; reconcile', 'Drop rate', 'Time skew', 'Seed'],
-)
-
-check(
-  'upload, before any file',
-  () =>
-    renderToString(
-      <UploadMapping
-        gateway={null}
-        ledger={null}
-        gatewayMap={guessMapping([])}
-        ledgerMap={guessMapping([])}
-        fallbackCurrency="INR"
-        fileError={{ gateway: null, ledger: null }}
-        runError={null}
-        running={false}
-        onFile={noop}
-        onMapChange={noop}
-        onFallbackCurrency={noop}
-        onRun={noop}
-        onBack={noop}
-      />,
-    ),
-  ['Gateway transactions (CSV)', 'Ledger entries (CSV)', 'Load both files to continue'],
-)
+check('/ landing', () => at('/', <Landing />), [
+  'Financial clarity,',
+  'effortlessly reconciled',
+  'Start reconciling',
+  'Multi-layer matching',
+])
 
 /* A real round trip: generate -> CSV -> parse -> map -> coerce -> reconcile. */
 const run = generate({ ...DEFAULT_GENERATOR_CONFIG, count: 400 }, DEFAULT_MATCH_CONFIG)
@@ -93,27 +61,59 @@ const ledgerCsv = parseCsv(toCsv(run.ledger, 'ledger'))
 const gatewayMap = guessMapping(gatewayCsv.headers)
 const ledgerMap = guessMapping(ledgerCsv.headers)
 
+const reconcileProps = {
+  generator: DEFAULT_GENERATOR_CONFIG,
+  onGeneratorChange: noop,
+  onRunGenerated: noop,
+  gateway: null,
+  ledger: null,
+  gatewayMap: guessMapping([]),
+  ledgerMap: guessMapping([]),
+  fallbackCurrency: 'INR',
+  fileError: { gateway: null, ledger: null },
+  runError: null,
+  running: false,
+  onFile: noop,
+  onMapChange: noop,
+  onFallbackCurrency: noop,
+  onRunUploaded: noop,
+}
+
+check('/reconcile chooser', () => at('/reconcile', <ChooseSource />), [
+  'Reconcile',
+  'Test data',
+  'Upload',
+  'Configure a run',
+  'Choose files',
+])
+
 check(
-  'upload, both files mapped',
+  '/reconcile/test',
+  () => at('/reconcile/test', <Reconcile mode="test" {...reconcileProps} />),
+  ['Test data', 'Upload', 'Sources', 'Generate and reconcile', 'Drop rate', 'Time skew', 'Seed'],
+)
+
+check(
+  '/reconcile/upload, no files',
+  () => at('/reconcile/upload', <Reconcile mode="upload" {...reconcileProps} />),
+  ['Gateway transactions', 'Ledger entries', 'gateway-sample.csv'],
+)
+
+check(
+  '/reconcile/upload, both files mapped',
   () =>
-    renderToString(
-      <UploadMapping
+    at(
+      '/reconcile/upload',
+      <Reconcile
+        mode="upload"
+        {...reconcileProps}
         gateway={{ name: 'gateway.csv', size: 1024, parsed: gatewayCsv }}
         ledger={{ name: 'ledger.csv', size: 900, parsed: ledgerCsv }}
         gatewayMap={gatewayMap}
         ledgerMap={ledgerMap}
-        fallbackCurrency="INR"
-        fileError={{ gateway: null, ledger: null }}
-        runError={null}
-        running={false}
-        onFile={noop}
-        onMapChange={noop}
-        onFallbackCurrency={noop}
-        onRun={noop}
-        onBack={noop}
       />,
     ),
-  ['Gateway columns', 'Ledger columns', 'First 5 rows', 'Fallback currency'],
+  ['Gateway columns', 'Ledger columns', 'Fallback currency'],
 )
 
 console.log('\ncsv: round trip through the mapping layer')
@@ -206,19 +206,19 @@ console.log('\ncsv: the shipped samples auto-map')
   }
 }
 
-console.log('\nscreens: dashboard')
+console.log('\nroutes: results')
 check(
-  'dashboard with a real result',
+  '/results with a real run',
   () =>
-    renderToString(
+    at(
+      '/results',
       <Dashboard
         run={direct}
         truth={run.truth}
         totalMs={12.5}
-        source="synthetic · smoke"
+        source="Synthetic · smoke"
         resolutions={{}}
         onResolutionChange={noop}
-        onNewRun={noop}
       />,
     ),
   [
@@ -228,7 +228,7 @@ check(
     'Processing',
     'Resolution by layer',
     'Injected vs detected',
-    'Exception queue',
+    'New run',
     'Transaction ID',
   ],
 )

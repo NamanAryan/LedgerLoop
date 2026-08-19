@@ -1,4 +1,4 @@
-/** Screen 3 — upload, then map columns. */
+/** The upload-and-map panel, shown on `/reconcile?mode=upload`. */
 
 import { useState } from 'react'
 import {
@@ -11,6 +11,15 @@ import {
 } from '../engine/csv'
 import type { Side } from '../engine/types'
 import { formatBytes, formatCount } from '../format'
+import {
+  Alert,
+  Button,
+  Eyebrow,
+  Panel,
+  PanelBody,
+  PanelHead,
+  Select,
+} from '../components/primitives'
 
 export interface UploadedFile {
   name: string
@@ -19,19 +28,11 @@ export interface UploadedFile {
 }
 
 const FIELD_LABELS: Record<FieldName, string> = {
-  txn_id: 'txn_id',
-  amount: 'amount',
-  currency: 'currency',
-  timestamp: 'timestamp',
-  idempotency_key: 'idempotency_key',
-}
-
-const FIELD_HINTS: Record<FieldName, string> = {
-  txn_id: 'The shared key both sides use for the same payment.',
-  amount: 'Decimal major units. Parsed as an exact integer, never a float.',
-  currency: 'ISO code. Unmapped falls back to the fixed value below.',
-  timestamp: 'ISO 8601 or epoch seconds/ms. Ambiguous date formats are rejected.',
-  idempotency_key: 'Optional. Without it, layer 4 cannot detect duplicates.',
+  txn_id: 'Transaction ID',
+  amount: 'Amount',
+  currency: 'Currency',
+  timestamp: 'Timestamp',
+  idempotency_key: 'Idempotency key',
 }
 
 function Dropzone({
@@ -50,10 +51,15 @@ function Dropzone({
   const [over, setOver] = useState(false)
   const id = `drop-${side}`
 
+  const border = over
+    ? 'border-gold border-solid'
+    : file !== null
+      ? 'border-sage/40 border-solid'
+      : 'border-line-2 border-dashed hover:border-gold/50'
+
   return (
     <label
       htmlFor={id}
-      className={`drop${file !== null ? ' filled' : ''}${over ? ' over' : ''}`}
       onDragOver={(event) => {
         event.preventDefault()
         setOver(true)
@@ -65,6 +71,7 @@ function Dropzone({
         const dropped = event.dataTransfer.files[0]
         if (dropped) onFile(dropped)
       }}
+      className={`block cursor-pointer rounded-lg border px-8 py-10 transition-colors duration-300 ease-refined ${border}`}
     >
       <input
         id={id}
@@ -75,34 +82,23 @@ function Dropzone({
           if (chosen) onFile(chosen)
           event.target.value = ''
         }}
+        className="sr-only"
       />
-      <div className="drop-title">{label}</div>
+      <div className="text-base text-cream">{label}</div>
+
       {file === null ? (
-        <div className="drop-hint">Drop a CSV here, or click to choose one.</div>
+        <p className="mt-2 text-sm font-light text-slate">Drop a CSV, or click to choose.</p>
       ) : (
-        <div className="drop-hint">
-          <span className="mono" style={{ color: 'var(--text)' }}>
-            {file.name}
-          </span>
-          <br />
-          {formatCount(file.parsed.rows.length)} rows · {file.parsed.headers.length} columns ·{' '}
-          {formatBytes(file.size)}
-          {file.parsed.raggedRows > 0 && (
-            <>
-              <br />
-              <span style={{ color: 'var(--warn)' }}>
-                {formatCount(file.parsed.raggedRows)} rows had an unexpected field count — padded,
-                not dropped.
-              </span>
-            </>
-          )}
+        <div className="mt-2 text-sm font-light text-slate">
+          <p className="text-ash">{file.name}</p>
+          <p>
+            {formatCount(file.parsed.rows.length)} rows · {file.parsed.headers.length}{' '}
+            columns · {formatBytes(file.size)}
+          </p>
         </div>
       )}
-      {error !== null && (
-        <div className="drop-hint" style={{ color: 'var(--bad)', marginTop: 8 }}>
-          {error}
-        </div>
-      )}
+
+      {error !== null && <p className="mt-3 text-sm font-light text-rose">{error}</p>}
     </label>
   )
 }
@@ -118,86 +114,51 @@ function MappingBlock({
   map: ColumnMap
   onMap: (next: ColumnMap) => void
 }) {
-  const mapped = new Set(Object.values(map).filter((v): v is string => v !== null))
-
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2 className="panel-title">{title}</h2>
-        <span className="eyebrow mono">{file.name}</span>
-      </div>
-      <div className="panel-body stack">
-        <div className="map-grid">
+    <Panel>
+      <PanelHead title={title} aside={<Eyebrow>{file.name}</Eyebrow>} />
+      <PanelBody>
+        <div className="grid gap-x-10 gap-y-7 sm:grid-cols-2 lg:grid-cols-3">
           {REQUIRED_FIELDS.map((field) => (
-            <div className="map-field" key={field}>
-              <label className="eyebrow" htmlFor={`${title}-${field}`}>
-                {FIELD_LABELS[field]}
-                {HARD_REQUIRED.includes(field) && <span className="map-required">*</span>}
+            <div key={field}>
+              <label htmlFor={`${title}-${field}`} className="mb-3 block">
+                <Eyebrow>
+                  {FIELD_LABELS[field]}
+                  {HARD_REQUIRED.includes(field) && <span className="ml-1 text-rose">*</span>}
+                </Eyebrow>
               </label>
-              <select
+              <Select
                 id={`${title}-${field}`}
-                className="select"
                 value={map[field] ?? ''}
-                onChange={(event) =>
-                  onMap({ ...map, [field]: event.target.value === '' ? null : event.target.value })
-                }
+                onChange={(value) => onMap({ ...map, [field]: value === '' ? null : value })}
               >
-                <option value="">— not mapped —</option>
+                <option value="">— Not mapped —</option>
                 {file.parsed.headers.map((header) => (
                   <option key={header} value={header}>
                     {header}
                   </option>
                 ))}
-              </select>
-              <p className="field-hint">{FIELD_HINTS[field]}</p>
+              </Select>
             </div>
           ))}
         </div>
-
-        <div>
-          <span className="eyebrow">First 5 rows</span>
-          <div className="preview-scroll" style={{ marginTop: 8 }}>
-            <table className="preview">
-              <thead>
-                <tr>
-                  {file.parsed.headers.map((header) => (
-                    <th key={header} className={mapped.has(header) ? 'mapped' : undefined}>
-                      {header}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {file.parsed.rows.slice(0, 5).map((row, index) => (
-                  <tr key={index}>
-                    {row.map((cell, cellIndex) => (
-                      <td key={cellIndex}>{cell === '' ? '—' : cell}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
+      </PanelBody>
+    </Panel>
   )
 }
 
-export function UploadMapping({
+export function UploadPanel({
   gateway,
   ledger,
   gatewayMap,
   ledgerMap,
   fallbackCurrency,
   fileError,
-  runError,
   running,
   onFile,
   onMapChange,
   onFallbackCurrency,
   onRun,
-  onBack,
 }: {
   gateway: UploadedFile | null
   ledger: UploadedFile | null
@@ -205,13 +166,11 @@ export function UploadMapping({
   ledgerMap: ColumnMap
   fallbackCurrency: string
   fileError: Record<Side, string | null>
-  runError: string | null
   running: boolean
   onFile: (side: Side, file: File) => void
   onMapChange: (side: Side, map: ColumnMap) => void
   onFallbackCurrency: (value: string) => void
   onRun: () => void
-  onBack: () => void
 }) {
   const bothPresent = gateway !== null && ledger !== null
   const errors = bothPresent
@@ -223,30 +182,18 @@ export function UploadMapping({
   const canRun = bothPresent && errors.length === 0 && !running
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Upload your data</h1>
-          <p className="page-sub">
-            Two CSVs, one per side. Files are read in this tab and never leave it.
-          </p>
-        </div>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onBack}>
-          ← Back
-        </button>
-      </div>
-
-      <div className="drops">
+    <div className="space-y-8">
+      <div className="grid gap-6 sm:grid-cols-2">
         <Dropzone
           side="gateway"
-          label="Gateway transactions (CSV)"
+          label="Gateway transactions"
           file={gateway}
           onFile={(file) => onFile('gateway', file)}
           error={fileError.gateway}
         />
         <Dropzone
           side="ledger"
-          label="Ledger entries (CSV)"
+          label="Ledger entries"
           file={ledger}
           onFile={(file) => onFile('ledger', file)}
           error={fileError.ledger}
@@ -254,17 +201,24 @@ export function UploadMapping({
       </div>
 
       {!bothPresent && (
-        <p className="field-hint">
-          Column mapping appears once both files are loaded — real exports rarely agree on
-          header names, so each side is mapped separately. No files handy?{' '}
-          <a href="/samples/gateway-sample.csv" download className="sample-link">
+        <p className="text-sm font-light text-slate">
+          No files handy? Download{' '}
+          <a
+            href="/samples/gateway-sample.csv"
+            download
+            className="text-gold transition-opacity duration-300 ease-refined hover:opacity-80"
+          >
             gateway-sample.csv
           </a>{' '}
           and{' '}
-          <a href="/samples/ledger-sample.csv" download className="sample-link">
+          <a
+            href="/samples/ledger-sample.csv"
+            download
+            className="text-gold transition-opacity duration-300 ease-refined hover:opacity-80"
+          >
             ledger-sample.csv
-          </a>{' '}
-          are a matched pair with deliberately different headers.
+          </a>
+          .
         </p>
       )}
 
@@ -286,52 +240,33 @@ export function UploadMapping({
       )}
 
       {bothPresent && (
-        <section className="panel">
-          <div className="panel-body row-between">
-            <div>
-              <span className="eyebrow">Fallback currency</span>
-              <p className="field-hint">
-                Used for any row whose currency column is unmapped or blank.
-              </p>
-            </div>
-            <select
-              className="select"
-              style={{ width: 120 }}
-              value={fallbackCurrency}
-              onChange={(event) => onFallbackCurrency(event.target.value)}
-            >
+        <Panel>
+          <PanelBody className="flex flex-wrap items-center justify-between gap-6">
+            <Eyebrow>Fallback currency</Eyebrow>
+            <Select className="w-32" value={fallbackCurrency} onChange={onFallbackCurrency}>
               {['INR', 'USD', 'EUR', 'GBP', 'JPY'].map((code) => (
                 <option key={code} value={code}>
                   {code}
                 </option>
               ))}
-            </select>
-          </div>
-        </section>
+            </Select>
+          </PanelBody>
+        </Panel>
       )}
 
       {errors.length > 0 && (
-        <div className="alert alert-warn">
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
+        <Alert tone="caution">
+          <ul className="space-y-1">
             {errors.map((message) => (
               <li key={message}>{message}</li>
             ))}
           </ul>
-        </div>
+        </Alert>
       )}
 
-      {runError !== null && <div className="alert">{runError}</div>}
-
-      <div className="actions">
-        <button type="button" className="btn btn-primary" onClick={onRun} disabled={!canRun}>
-          {running ? 'Reconciling…' : 'Reconcile'}
-        </button>
-        {!bothPresent && (
-          <span className="field-hint" style={{ margin: 0 }}>
-            Load both files to continue.
-          </span>
-        )}
-      </div>
+      <Button variant="primary" onClick={onRun} disabled={!canRun}>
+        {running ? 'Reconciling…' : 'Reconcile'}
+      </Button>
     </div>
   )
 }
