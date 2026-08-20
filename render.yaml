@@ -17,8 +17,9 @@
 # is written down in worker/embedded.py and in DEPLOY.md, and the paid topology is one
 # env var plus a service block away -- see "Upgrading" in DEPLOY.md.
 #
-# Region: every resource must name the SAME region or they cross the public internet
-# and lose private networking. Change them together, or not at all.
+# Region: the database, Key Value and API must name the SAME region or they cross the
+# public internet and lose private networking. Change those three together, or not at
+# all. The static site takes no region -- it is CDN-served everywhere.
 
 databases:
   - name: ledgerloop-db
@@ -135,7 +136,9 @@ services:
   - type: web
     name: ledgerloop-web
     runtime: static
-    region: singapore
+    # No region: a static site is served from Render's global CDN rather than from one
+    # datacentre, and the blueprint is rejected if you name one. The region note at the
+    # top of this file applies to the three resources that hold state or run a process.
     rootDir: frontend
     # `npm ci` not `npm install`: the lockfile is the build input, and a deploy that
     # silently resolved a different dependency tree than CI tested is not the same app.
