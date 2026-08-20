@@ -1,0 +1,80 @@
+# Keep the free API instance warm.
+#
+# Render suspends a free web service after 15 minutes with no inbound request, and the
+# next visitor pays a cold start of roughly a minute — long enough that someone opening
+# a portfolio link concludes the thing is broken and leaves. This pings /health often
+# enough that the idle timer never expires.
+#
+# /health specifically, not /ready: this is a liveness touch, not a dependency check.
+# It executes a handler and returns, without touching Postgres or Redis, so it wakes the
+# process at the lowest possible cost and never reports a failure that only means a
+# datastore blinked.
+#
+# Budget: Render allows 750 free instance-hours per month and 24/7 is about 730, so
+# exactly one always-on free web service fits. The static site does not consume instance
+# hours. If you add a second free web service, this no longer fits and one of them will
+# be suspended for the rest of the month.
+#
+# **This is best-effort.** GitHub queues scheduled workflows and delays them under load,
+# sometimes past the 15-minute idle window, so the service will still sleep occasionally.
+# If cold starts matter more than that, point an external uptime monitor at /health
+# instead — cron-job.org and UptimeRobot both do 5-minute checks on a free plan and fire
+# on time. This workflow is the zero-extra-accounts option, not the most reliable one.
+
+name: keepalive
+
+on:
+  schedule:
+    # Every 10 minutes, leaving headroom under the 15-minute idle timeout for the delay
+    # GitHub introduces. Do not tighten this below 5 minutes; that is the platform's
+    # floor and scheduling below it silently does nothing.
+    #
+    # Minutes budget: ~4,320 runs/month, and GitHub bills a MINIMUM OF ONE MINUTE per
+    # job — so this costs ~4,320 minutes. Free and unlimited on a public repository.
+    # A private one gets 2,000 minutes/month, which this blows through: use an external
+    # pinger there, or raise the interval to '*/30 * * * *' and accept the cold starts.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Never queue these up. A delayed batch all firing at once would spend minutes to
+# achieve nothing a single request has not already achieved.
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      # No checkout: this job needs one URL and curl, not the repository. Skipping it
+      # halves the runtime and therefore the billed minutes.
+      - name: Ping /health
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          if [ -z "$API_BASE_URL" ]; then
+            echo "API_BASE_URL repository variable is not set."
+            echo "Settings -> Secrets and variables -> Actions -> Variables -> New."
+            echo "Value: https://<your-api>.onrender.com  (no trailing slash)"
+            exit 1
+          fi
+
+          # --max-time 90: a cold start is the case this exists to prevent, so the very
+          # request that wakes a suspended instance is expected to be slow. Timing it
+          # out at the default would fail precisely when the ping did its job.
+          # --retry on transport errors only; a 5xx from a live app is not this job's
+          # problem and should not turn the run red.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                   --max-time 90 --retry 2 --retry-delay 5 --retry-connrefused \
+                   "$API_BASE_URL/health")
+
+          echo "GET $API_BASE_URL/health -> $code"
+
+          # Any answer at all means the process is awake, which is the entire point.
+          # Only a total failure to respond is worth flagging.
+          if [ "$code" = "000" ]; then
+            echo "No response — the instance may be suspended or the URL is wrong."
+            exit 1
+          fi

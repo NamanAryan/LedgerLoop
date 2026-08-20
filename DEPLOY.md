@@ -195,9 +195,29 @@ ingestion resumes, the relay drains the outbox, and the matcher works through th
 stream backlog. A webhook sender would time out and retry, which the idempotency layer
 handles correctly — the first retry simply does the work.
 
-You have 750 free instance-hours/month, and 24/7 is ~730, so a keep-alive ping would
-just fit — but it would consume essentially all of them, and any second free service
-would then run out. Prefer the cold start.
+`.github/workflows/keepalive.yml` prevents this by pinging `/health` every 10 minutes.
+You have 750 free instance-hours/month and 24/7 is ~730, so exactly one always-on free
+web service fits — the static site does not consume instance hours. **Add a second free
+web service and this no longer fits**, and one of them will be suspended for the rest of
+the month.
+
+Set the repository variable it reads (Settings → Secrets and variables → Actions →
+**Variables**, not Secrets — this is not sensitive):
+
+| Name | Value |
+|---|---|
+| `API_BASE_URL` | `https://ledgerloop-api.onrender.com` (no trailing slash) |
+
+It is best-effort. GitHub delays scheduled workflows under load, sometimes past the
+15-minute idle window, so the service will still sleep occasionally. For a link you are
+handing to other people, point a real uptime monitor at `/health` instead —
+cron-job.org and UptimeRobot both do 5-minute checks free and fire on time. The workflow
+is the no-extra-accounts option, not the most reliable one.
+
+Note the minutes cost: ~4,320 runs/month, and GitHub bills a minimum of one minute per
+job. Free and unlimited on a **public** repository; a **private** one gets 2,000
+minutes/month, which this exceeds — use an external pinger there, or raise the interval
+and accept the cold starts.
 
 **Free Postgres expires after 30 days.** Render deletes it. Back up anything you care
 about or move to a paid database before then. This is the hard deadline on the whole
