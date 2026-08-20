@@ -238,9 +238,6 @@ than starting on a sync driver that would block the event loop.
 
 ## Benchmarks
 
-See [BENCHMARKS.md](BENCHMARKS.md) for the full table, methodology, and the correctness
-check at each rate.
-
 Measured on a 4-worker API and 3 matcher containers, 30s per rate, against real
 Postgres and Redis in Docker:
 

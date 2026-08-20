@@ -14,8 +14,9 @@
 #
 # This is a deployment concession and not a redesign. The loops are the same objects
 # driven by the same shutdown protocol; only the process boundary moved. What it costs
-# is written down in worker/embedded.py and in DEPLOY.md, and the paid topology is one
-# env var plus a service block away -- see "Upgrading" in DEPLOY.md.
+# is written down in worker/embedded.py, and the paid topology is one env var plus a
+# service block away: set LEDGERLOOP_EMBED_WORKER to "false" and add a worker service
+# running `python -m ledgerloop.worker.main` with the same database and Redis vars.
 #
 # Region: the database, Key Value and API must name the SAME region or they cross the
 # public internet and lose private networking. Change those three together, or not at
@@ -89,7 +90,8 @@ services:
 
       # The free-tier switch. Hosts the matcher, relay and sweeper on this process's
       # event loop. Set to "false" the moment a background worker is affordable and add
-      # the worker service back per DEPLOY.md -- nothing else has to change.
+      # a worker service running `python -m ledgerloop.worker.main` with the same
+      # database and Redis variables -- nothing else has to change.
       - key: LEDGERLOOP_EMBED_WORKER
         value: "true"
       - key: LEDGERLOOP_ENABLE_RELAY

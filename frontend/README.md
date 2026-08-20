@@ -91,9 +91,15 @@ fails preflight. It ships allowing `http://localhost:5173`.
 
 ## Deploying
 
-Render static site, declared in the repo-root `render.yaml` alongside the API. See
-`DEPLOY.md`. Vercel works identically — set the root directory to `frontend` and supply
-`VITE_API_BASE_URL`.
+Vercel, from this directory — `vercel.json` declares the Vite build and the SPA
+rewrite. Set `VITE_API_BASE_URL` to the API's base URL and redeploy with the build
+cache disabled: Vite substitutes it at build time, so changing it without a rebuild
+does nothing. The repo-root `render.yaml` declares an equivalent static site if you
+would rather host both halves on Render.
+
+Whichever you use, add that origin to `LEDGERLOOP_CORS_ORIGINS` on the API. Vercel
+preview deployments get a unique hostname per commit and will not be on the allowlist,
+so test on the production domain.
 
 ## Layout
 

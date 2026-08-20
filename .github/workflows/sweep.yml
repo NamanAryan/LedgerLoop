@@ -3,7 +3,7 @@
 # Render has no free instance type for cron jobs, so the unmatched sweep runs here
 # instead. This is not a reimplementation: it invokes `python -m ledgerloop.worker.sweep`,
 # the same entry point a Render Cron Job would run, against the same database. Moving
-# it back is a schedule and a `dockerCommand` -- see DEPLOY.md.
+# it back is a schedule and a `dockerCommand` on a Render Cron Job, nothing more.
 #
 # It is the BACKSTOP, not the primary. The API runs its own sweeper in-process every
 # 30s, which is what makes a break visible inside a demo rather than a quarter of an
@@ -71,7 +71,7 @@ jobs:
           # Render's EXTERNAL database URL, from the dashboard. The internal hostname
           # only resolves inside Render's network. A bare postgresql:// scheme is fine
           # -- config.py upgrades it to asyncpg.
-          LEDGERLOOP_DATABASE_URL: ${{ secrets.LEDGERLOOP_DATABASE_URL }}
+          LEDGERLOOP_DATABASE_URL: ${{ secrets['LEDGERLOOP_DATABASE_URL'] }}
           # Plain-text logs: the run log is read by a human here, not shipped to a
           # collector.
           LEDGERLOOP_LOG_JSON: "false"
@@ -81,4 +81,17 @@ jobs:
           LEDGERLOOP_UNMATCHED_AFTER_S: "60"
         # No Redis credential: the sweeper is Postgres-only. Non-zero exit fails the
         # run, which is the health signal -- there is nothing else watching this.
-        run: uv run python -m ledgerloop.worker.sweep
+        run: |
+          # An unset secret arrives as an empty string, which reaches the config layer
+          # and dies on a PostgresDsn validation traceback that says nothing about
+          # where the value was supposed to come from. Checking it here costs one line
+          # and turns that into an instruction.
+          if [ -z "$LEDGERLOOP_DATABASE_URL" ]; then
+            echo "LEDGERLOOP_DATABASE_URL secret is not set."
+            echo "Settings -> Secrets and variables -> Actions -> Secrets -> New."
+            echo "Value: Render's EXTERNAL database URL (the internal hostname only"
+            echo "resolves inside Render's network)."
+            exit 1
+          fi
+
+          uv run python -m ledgerloop.worker.sweep

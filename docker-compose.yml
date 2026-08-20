@@ -55,7 +55,7 @@ services:
 
   api:
     build: ./backend
-    # Ingestion is CPU-bound per process (see BENCHMARKS.md): one uvicorn worker tops
+    # Ingestion is CPU-bound per process: one uvicorn worker tops
     # out well below what Postgres can absorb, so the scaling lever is process count.
     #   API_WORKERS=4 docker compose up -d api
     command:
@@ -155,7 +155,8 @@ services:
   #   cd frontend && npm install && npm run dev     -> http://localhost:5173
   #
   # localhost:5173 is in LEDGERLOOP_CORS_ORIGINS by default, so it works against this
-  # stack with no extra configuration. Deployment is a Render static site; see DEPLOY.md.
+  # stack with no extra configuration. In production the dashboard deploys to Vercel;
+  # render.yaml also declares an equivalent static site.
 
 volumes:
   pgdata:
