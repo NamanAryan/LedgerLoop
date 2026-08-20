@@ -17,9 +17,22 @@
 #
 # **This is best-effort.** GitHub queues scheduled workflows and delays them under load,
 # sometimes past the 15-minute idle window, so the service will still sleep occasionally.
+# The app also pings /health on page load (see App.tsx), which covers the case this
+# misses: a visitor arriving at a suspended instance starts the wake-up while they are
+# still reading, rather than after they click something.
+#
 # If cold starts matter more than that, point an external uptime monitor at /health
-# instead — cron-job.org and UptimeRobot both do 5-minute checks on a free plan and fire
+# instead -- cron-job.org and UptimeRobot both do 5-minute checks on a free plan and fire
 # on time. This workflow is the zero-extra-accounts option, not the most reliable one.
+#
+# !! PRIVATE REPOSITORIES: DELETE THIS WORKFLOW OR RAISE THE INTERVAL !!
+#
+# GitHub bills a minimum of one minute per job, so `*/10` costs ~4,320 minutes/month
+# against a 2,000-minute private allowance. Exhausting it does not just stop this job --
+# it stops ALL Actions on the repository, including sweep.yml, which is the only thing
+# declaring unmatched breaks while the API is asleep. A keep-alive that silently
+# disables the sweeper is a bad trade. Public repositories have unlimited minutes and
+# are unaffected.
 
 name: keepalive
 

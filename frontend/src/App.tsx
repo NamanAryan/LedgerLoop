@@ -12,9 +12,10 @@
  * "no injected-vs-detected panel" rather than to an empty screen.
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, Link, Route, Routes, useNavigate } from 'react-router-dom'
 import { EMPTY_MAP, coerceRows, guessMapping, parseCsv, type ColumnMap } from './lib/csv'
+import { getHealth } from './api/client'
 import { ingestRows, type IngestProgress, type IngestSummary } from './api/ingest'
 import {
   DEFAULT_GENERATOR_CONFIG,
@@ -44,6 +45,27 @@ export default function App() {
 
 function Shell() {
   const navigate = useNavigate()
+
+  /**
+   * Wake the API as soon as the page opens.
+   *
+   * A free Render instance suspends after 15 minutes idle and takes roughly a minute
+   * to come back. This app is served from a CDN, so it loads instantly and the backend
+   * is not touched until the operator actually starts a run — meaning without this the
+   * cold start lands *mid-action*, right after they click Reconcile, which reads as the
+   * app hanging.
+   *
+   * Firing it here spends that minute while they are still reading the landing page.
+   * Deliberately fire-and-forget: the result is not needed, a failure is not actionable
+   * yet, and nothing should block rendering on it. /health touches no datastore, so
+   * this is the cheapest possible way to start the clock.
+   */
+  useEffect(() => {
+    void getHealth().catch(() => {
+      /* Cold start, offline, or API not deployed yet. The screens that need it report
+         their own errors with context this early ping could not give. */
+    })
+  }, [])
 
   const [generator, setGenerator] = useState<GeneratorConfig>(DEFAULT_GENERATOR_CONFIG)
   const [progress, setProgress] = useState<IngestProgress | null>(null)
