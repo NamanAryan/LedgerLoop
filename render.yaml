@@ -61,18 +61,12 @@ services:
     rootDir: backend
     dockerfilePath: ./Dockerfile
 
-    # Migrations run here because Render's preDeployCommand needs a paid instance type.
-    # Safe at ONE instance and only one: Alembic takes no lock that would make N
-    # replicas racing `upgrade head` on boot safe. The free plan gives exactly one.
-    #
-    # `exec` so uvicorn replaces the shell and receives SIGTERM directly -- without it
-    # the shell holds PID 1, swallows the signal, and the embedded matcher never gets
-    # its clean drain.
-    #
-    # One uvicorn worker, which EMBED_WORKER requires: with --workers N each worker
-    # would start its own matcher and relay. Correctness survives that, but it
-    # multiplies the polling for no gain.
-    dockerCommand: 'sh -c "alembic upgrade head && exec uvicorn ledgerloop.api.app:app --host 0.0.0.0 --port $PORT --workers 1"'
+    # Plain whitespace-separated tokens, and nothing else. No quotes, no `&&`, no
+    # `$PORT`. Render does not hand this to a shell, so any metacharacter here arrives
+    # as a literal part of the command *name* and the container exits 127 with
+    # `not found`. Everything that needs a shell -- migrations, PORT, exec -- lives in
+    # the script, where it can also be read and run locally.
+    dockerCommand: sh ./scripts/start-api.sh
 
     # /health, not /ready. Render's health check restarts an unhealthy service, which
     # makes it a liveness probe -- and wiring a dependency check into liveness is how a
