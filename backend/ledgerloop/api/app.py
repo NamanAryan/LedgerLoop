@@ -55,7 +55,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await embedded.start()
         app.state.embedded = embedded
 
-        log.info("api.started", service=settings.service_name, embedded_worker=embedded is not None)
+        # cors_origins is logged because a wrong or missing LEDGERLOOP_CORS_ORIGINS is
+        # invisible from the outside: pydantic-settings ignores an unrecognised key, so
+        # a typo silently leaves the localhost defaults in place and the browser reports
+        # only an opaque network error. Printing the resolved list makes the boot state
+        # checkable in one glance at the logs.
+        log.info(
+            "api.started",
+            service=settings.service_name,
+            embedded_worker=embedded is not None,
+            cors_origins=settings.cors_origins,
+        )
         try:
             yield
         finally:

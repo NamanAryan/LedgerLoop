@@ -143,7 +143,15 @@ class Settings(BaseSettings):
     #: "Expecting value: line 1 column 1". NoDecode hands the string through untouched
     #: so ``_split_origins`` below can accept both forms.
     cors_origins: Annotated[list[str], NoDecode] = Field(
-        default=["http://localhost:5173", "http://127.0.0.1:5173"],
+        default=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            # Vite binds the IPv6 loopback on Windows and prints this form, so a dev
+            # who opens the URL it printed arrives with this Origin. Omitting it fails
+            # the preflight with a bare 400 and no Allow-Origin header, which the
+            # browser reports only as an opaque network error.
+            "http://[::1]:5173",
+        ],
         description="Comma-separated in the environment; JSON list also accepted.",
     )
 
