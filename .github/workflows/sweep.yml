@@ -71,7 +71,7 @@ jobs:
           # Render's EXTERNAL database URL, from the dashboard. The internal hostname
           # only resolves inside Render's network. A bare postgresql:// scheme is fine
           # -- config.py upgrades it to asyncpg.
-          LEDGERLOOP_DATABASE_URL: ${{ secrets.LEDGERLOOP_DATABASE_URL }}
+          LEDGERLOOP_DATABASE_URL: ${{ secrets.LEDGERLOOP_DATABASE_URL || vars.LEDGERLOOP_DATABASE_URL }}
           # Plain-text logs: the run log is read by a human here, not shipped to a
           # collector.
           LEDGERLOOP_LOG_JSON: "false"
