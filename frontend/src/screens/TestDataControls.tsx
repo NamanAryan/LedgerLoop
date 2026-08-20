@@ -1,7 +1,11 @@
 /** The synthetic-run panel, shown on `/reconcile?mode=test`. */
 
-import { LIMITS, clampGeneratorConfig, type GeneratorConfig } from '../engine/generate'
-import { DEFAULT_MATCH_CONFIG } from '../engine/types'
+import {
+  BACKEND_RULES,
+  LIMITS,
+  clampGeneratorConfig,
+  type GeneratorConfig,
+} from '../lib/generate'
 import { formatCount, formatDuration } from '../format'
 import {
   Alert,
@@ -43,8 +47,8 @@ export function TestDataPanel({
   // collapse and look like a bug.
   const skewTail = config.timeSkewMs * 1.9
   const skewWarning =
-    skewTail > DEFAULT_MATCH_CONFIG.driftWindowMs
-      ? `Part of this spread falls outside the ${formatDuration(DEFAULT_MATCH_CONFIG.driftWindowMs)} drift window, so those pairs will come back unmatched.`
+    skewTail > BACKEND_RULES.driftWindowMs
+      ? `Part of this spread falls outside the ${formatDuration(BACKEND_RULES.driftWindowMs)} drift window, so those pairs will come back unmatched.`
       : null
 
   return (

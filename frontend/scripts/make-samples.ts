@@ -9,9 +9,9 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { generate } from '../src/engine/generate'
-import { formatMinor } from '../src/engine/money'
-import { DEFAULT_MATCH_CONFIG, type TxnFacts } from '../src/engine/types'
+import { generate } from '../src/lib/generate'
+import { formatMinor } from '../src/lib/money'
+import type { SourceRow } from '../src/lib/csv'
 
 const run = generate(
   {
@@ -24,10 +24,9 @@ const run = generate(
     seed: 4711,
     anchorMs: Date.UTC(2026, 7, 19, 17, 45, 0),
   },
-  DEFAULT_MATCH_CONFIG,
 )
 
-function csv(headers: string[], rows: readonly TxnFacts[], cell: (row: TxnFacts) => string[]) {
+function csv(headers: string[], rows: readonly SourceRow[], cell: (row: SourceRow) => string[]) {
   return [headers.join(','), ...rows.map((row) => cell(row).join(','))].join('\n') + '\n'
 }
 

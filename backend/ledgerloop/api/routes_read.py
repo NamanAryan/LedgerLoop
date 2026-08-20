@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Path, Query, status
 
-from ledgerloop.api.deps import SessionDep
+from ledgerloop.api.deps import SessionDep, SettingsDep
 from ledgerloop.api.schemas import (
     ExceptionOut,
     ExceptionPage,
@@ -52,6 +52,7 @@ def _parse_cursor(cursor: str | None) -> int | None:
 @router.get("/stats", response_model=StatsOut, summary="Reconciliation health over a window")
 async def get_stats(
     session: SessionDep,
+    settings: SettingsDep,
     window: Annotated[Literal["1h", "24h", "7d"], Query()] = "1h",
 ) -> StatsOut:
     row = await fetch_stats(session, window)
@@ -75,6 +76,7 @@ async def get_stats(
         match_rate=(row.matched / total) if total else 0.0,
         latency_ms=LatencyPercentiles(p50=row.p50, p95=row.p95, p99=row.p99),
         throughput_tx_per_sec=total / seconds if seconds else 0.0,
+        unmatched_after_s=settings.unmatched_after_s,
         open_exceptions=row.open_exceptions,
     )
 
@@ -124,6 +126,8 @@ def _result_out(row) -> ReconciliationResultOut:  # type: ignore[no-untyped-def]
         currency=present.currency if present else None,
         gateway_amount=gateway.amount if gateway else None,
         ledger_amount=ledger.amount if ledger else None,
+        gateway_occurred_at=gateway.occurred_at if gateway else None,
+        ledger_occurred_at=ledger.occurred_at if ledger else None,
     )
 
 
@@ -146,6 +150,8 @@ def _exception_out(exc, result) -> ExceptionOut:  # type: ignore[no-untyped-def]
         currency=present.currency if present else None,
         gateway_amount=gateway.amount if gateway else None,
         ledger_amount=ledger.amount if ledger else None,
+        gateway_occurred_at=gateway.occurred_at if gateway else None,
+        ledger_occurred_at=ledger.occurred_at if ledger else None,
     )
 
 

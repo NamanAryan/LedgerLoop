@@ -2,33 +2,27 @@
  * Routing and run state.
  *
  * One route per stage of the job: the pitch on `/`, the choice of source on
- * `/reconcile`, the setup on `/reconcile/test` or `/reconcile/upload`, and the
- * result on `/results`. The
- * run itself lives here rather than in a route, because /results is a view of
- * something /reconcile produced — a reload has nothing to show, so it sends you
- * back rather than inventing an empty dashboard.
+ * `/reconcile`, the setup on `/reconcile/test` or `/reconcile/upload`, and the result
+ * on `/results`.
+ *
+ * `/results` is a live view of the backend rather than a render of something this app
+ * computed, so a reload no longer has nothing to show — the dashboard just polls. What
+ * a reload *does* lose is the ground truth from a synthetic run, which only exists in
+ * this tab because the generator recorded it before sending. The dashboard degrades to
+ * "no injected-vs-detected panel" rather than to an empty screen.
  */
 
 import { useCallback, useState } from 'react'
+import { BrowserRouter, Link, Route, Routes, useNavigate } from 'react-router-dom'
+import { EMPTY_MAP, coerceRows, guessMapping, parseCsv, type ColumnMap } from './lib/csv'
+import { ingestRows, type IngestProgress, type IngestSummary } from './api/ingest'
 import {
-  BrowserRouter,
-  Link,
-  Navigate,
-  Route,
-  Routes,
-  useNavigate,
-} from 'react-router-dom'
-import {
-  EMPTY_MAP,
-  coerceRows,
-  guessMapping,
-  parseCsv,
-  type ColumnMap,
-} from './engine/csv'
-import { runGenerated, runUploaded } from './engine/client'
-import { DEFAULT_GENERATOR_CONFIG, type GeneratorConfig } from './engine/generate'
-import { DEFAULT_MATCH_CONFIG, type GroundTruth, type ReconResult, type Side } from './engine/types'
-import type { Resolution } from './components/ExceptionDetail'
+  DEFAULT_GENERATOR_CONFIG,
+  generate,
+  type GeneratorConfig,
+  type GroundTruth,
+} from './lib/generate'
+import type { Side } from './api/types'
 import { RunProgress } from './components/RunProgress'
 import { Landing } from './screens/Landing'
 import { ChooseSource } from './screens/ChooseSource'
@@ -37,28 +31,8 @@ import type { UploadedFile } from './screens/UploadMapping'
 import { Dashboard } from './screens/Dashboard'
 import { formatCount } from './format'
 
-interface CompletedRun {
-  result: ReconResult
-  truth: GroundTruth | null
-  totalMs: number
-  source: string
-}
-
 /** Files this large take long enough to read that the UI must say something. */
 const LARGE_FILE_BYTES = 4 * 1024 * 1024
-
-/**
- * The engine returns in milliseconds, which is too fast to read. Runs are held
- * open this long so the layer walk in RunProgress is legible. It delays the
- * screen, never the work — the elapsed time on the dashboard stays the measured
- * one.
- */
-const MIN_RUN_MS = 1800
-
-function heldOpen<T>(work: Promise<T>, ms: number): Promise<T> {
-  const wait = new Promise((resolve) => setTimeout(resolve, ms))
-  return Promise.all([work, wait]).then(([value]) => value)
-}
 
 export default function App() {
   return (
@@ -72,9 +46,11 @@ function Shell() {
   const navigate = useNavigate()
 
   const [generator, setGenerator] = useState<GeneratorConfig>(DEFAULT_GENERATOR_CONFIG)
+  const [progress, setProgress] = useState<IngestProgress | null>(null)
   const [running, setRunning] = useState(false)
-  const [run, setRun] = useState<CompletedRun | null>(null)
-  const [resolutions, setResolutions] = useState<Record<number, Resolution>>({})
+  const [summary, setSummary] = useState<IngestSummary | null>(null)
+  const [truth, setTruth] = useState<GroundTruth | null>(null)
+  const [source, setSource] = useState('')
   const [runError, setRunError] = useState<string | null>(null)
 
   const [files, setFiles] = useState<Record<Side, UploadedFile | null>>({
@@ -91,24 +67,55 @@ function Shell() {
   })
   const [fallbackCurrency, setFallbackCurrency] = useState('INR')
 
-  const startRun = useCallback(() => {
-    setRunning(true)
-    setRunError(null)
-    setResolutions({})
+  /** Ship both sides to the API, then hand over to the dashboard's polling. */
+  const send = useCallback(
+    async (
+      gateway: Parameters<typeof ingestRows>[0],
+      ledger: Parameters<typeof ingestRows>[1],
+      label: string,
+      groundTruth: GroundTruth | null,
+    ) => {
+      setRunning(true)
+      setRunError(null)
+      setProgress(null)
+      setTruth(groundTruth)
+      setSource(label)
 
-    heldOpen(runGenerated(generator, DEFAULT_MATCH_CONFIG), MIN_RUN_MS)
-      .then((outcome) => {
-        setRun({
-          result: outcome.result,
-          truth: outcome.truth,
-          totalMs: outcome.totalMs,
-          source: `Synthetic · seed ${generator.seed}`,
-        })
+      try {
+        const result = await ingestRows(gateway, ledger, { onProgress: setProgress })
+        setSummary(result)
+        // A run where nothing landed is a failed run, not an empty dashboard. Saying so
+        // here beats sending the operator to a screen of zeroes to work it out.
+        if (result.gateway.failed > 0 && result.gateway.accepted === 0 && gateway.length > 0) {
+          setRunError(
+            `Nothing was accepted. ${result.errors[0] ?? 'The API rejected every row.'}`,
+          )
+          return
+        }
         navigate('/results')
-      })
-      .catch((error: Error) => setRunError(error.message))
-      .finally(() => setRunning(false))
-  }, [generator, navigate])
+      } catch (caught) {
+        setRunError(
+          caught instanceof Error
+            ? `Ingestion failed: ${caught.message}`
+            : 'Ingestion failed against the API.',
+        )
+      } finally {
+        setRunning(false)
+        setProgress(null)
+      }
+    },
+    [navigate],
+  )
+
+  const startGenerated = useCallback(() => {
+    const run = generate(generator)
+    void send(
+      run.gateway,
+      run.ledger,
+      `Synthetic · seed ${generator.seed} · run ${run.runId}`,
+      run.truth,
+    )
+  }, [generator, send])
 
   const handleFile = useCallback(async (side: Side, file: File) => {
     setFileError((current) => ({ ...current, [side]: null }))
@@ -122,10 +129,7 @@ function Shell() {
         }))
         return
       }
-      setFiles((current) => ({
-        ...current,
-        [side]: { name: file.name, size: file.size, parsed },
-      }))
+      setFiles((current) => ({ ...current, [side]: { name: file.name, size: file.size, parsed } }))
       setMaps((current) => ({ ...current, [side]: guessMapping(parsed.headers) }))
     } catch {
       setFileError((current) => ({
@@ -135,32 +139,26 @@ function Shell() {
     }
   }, [])
 
-  const startUploadRun = useCallback(() => {
+  const startUpload = useCallback(() => {
     const gatewayFile = files.gateway
     const ledgerFile = files.ledger
     if (gatewayFile === null || ledgerFile === null) return
 
-    setRunning(true)
-    setRunError(null)
-    setResolutions({})
-
+    // No keyPrefix: the derived idempotency key is a pure function of the row's own
+    // content, so re-uploading the same file is recognised by the backend as a repeat
+    // submission rather than counted twice.
     const gateway = coerceRows(gatewayFile.parsed, {
       side: 'gateway',
       map: maps.gateway,
       fallbackCurrency,
-      idOffset: 1,
     })
-    // Ledger ids start past the gateway's range so a row id is unique across both
-    // sides — the engine reports them, and two rows numbered 7 would be ambiguous.
     const ledger = coerceRows(ledgerFile.parsed, {
       side: 'ledger',
       map: maps.ledger,
       fallbackCurrency,
-      idOffset: gateway.rows.length + 1_000_001,
     })
 
     if (gateway.rows.length === 0 && ledger.rows.length === 0) {
-      setRunning(false)
       setRunError(
         'No row in either file survived parsing. Check the amount and timestamp mappings.',
       )
@@ -168,23 +166,9 @@ function Shell() {
     }
 
     const rejected = gateway.rejectedCount + ledger.rejectedCount
-    const runId = `UP-${Date.now().toString(36).toUpperCase().slice(-5)}`
-
-    heldOpen(runUploaded(gateway.rows, ledger.rows, DEFAULT_MATCH_CONFIG, runId), MIN_RUN_MS)
-      .then((outcome) => {
-        const rejectNote =
-          rejected > 0 ? ` · ${formatCount(rejected)} rows rejected at parse` : ''
-        setRun({
-          result: outcome.result,
-          truth: null,
-          totalMs: outcome.totalMs,
-          source: `${gatewayFile.name} + ${ledgerFile.name}${rejectNote}`,
-        })
-        navigate('/results')
-      })
-      .catch((error: Error) => setRunError(error.message))
-      .finally(() => setRunning(false))
-  }, [files, maps, fallbackCurrency, navigate])
+    const note = rejected > 0 ? ` · ${formatCount(rejected)} rows rejected at parse` : ''
+    void send(gateway.rows, ledger.rows, `${gatewayFile.name} + ${ledgerFile.name}${note}`, null)
+  }, [files, maps, fallbackCurrency, send])
 
   return (
     <div className="flex min-h-svh flex-col">
@@ -212,7 +196,7 @@ function Shell() {
                   mode={mode}
                   generator={generator}
                   onGeneratorChange={setGenerator}
-                  onRunGenerated={startRun}
+                  onRunGenerated={startGenerated}
                   gateway={files.gateway}
                   ledger={files.ledger}
                   gatewayMap={maps.gateway}
@@ -227,39 +211,22 @@ function Shell() {
                     }
                     void handleFile(side, file)
                   }}
-                  onMapChange={(side, map) =>
-                    setMaps((current) => ({ ...current, [side]: map }))
-                  }
+                  onMapChange={(side, map) => setMaps((current) => ({ ...current, [side]: map }))}
                   onFallbackCurrency={setFallbackCurrency}
-                  onRunUploaded={startUploadRun}
+                  onRunUploaded={startUpload}
                 />
               }
             />
           ))}
           <Route
             path="/results"
-            element={
-              run === null ? (
-                <Navigate to="/reconcile" replace />
-              ) : (
-                <Dashboard
-                  run={run.result}
-                  truth={run.truth}
-                  totalMs={run.totalMs}
-                  source={run.source}
-                  resolutions={resolutions}
-                  onResolutionChange={(id, next) =>
-                    setResolutions((current) => ({ ...current, [id]: next }))
-                  }
-                />
-              )
-            }
+            element={<Dashboard source={source} truth={truth} summary={summary} />}
           />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Landing />} />
         </Routes>
       </main>
 
-      {running && <RunProgress durationMs={MIN_RUN_MS} />}
+      {running && <RunProgress progress={progress} />}
     </div>
   )
 }

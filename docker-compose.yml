@@ -68,6 +68,11 @@ services:
       LEDGERLOOP_DATABASE_URL: postgresql+asyncpg://ledgerloop:ledgerloop@postgres:5432/ledgerloop
       LEDGERLOOP_REDIS_URL: redis://redis:6379/0
       LEDGERLOOP_LOG_JSON: "true"
+      # The API reports this on /v1/stats so a client can tell "not matched yet" from
+      # "declared a break". It is the *worker's* sweeper that acts on it, so the two
+      # services must be given the same value -- an API advertising a window its
+      # sweeper does not honour would be worse than not reporting one at all.
+      LEDGERLOOP_UNMATCHED_AFTER_S: "${LEDGERLOOP_UNMATCHED_AFTER_S:-300}"
     ports:
       - "8000:8000"
     depends_on:
@@ -142,14 +147,15 @@ services:
       api:
         condition: service_healthy
 
-  # No dashboard service. The old ops console was three static files behind nginx that
-  # reverse-proxied /v1 to the API; frontend/ is now a standalone React SPA that calls
-  # no API at all -- the matching engine is a TypeScript port running in a Web Worker.
-  # It has no Dockerfile and needs none:
+  # No dashboard service. frontend/ is a Vite dev server in development and a static
+  # bundle in production, and it is a pure client of the API above -- it computes nothing
+  # about matching. Putting it behind nginx here would only add a proxy hop between two
+  # things that already talk over CORS.
   #
   #   cd frontend && npm install && npm run dev     -> http://localhost:5173
   #
-  # It deploys to Vercel as static output, independently of this stack. See DEPLOY.md.
+  # localhost:5173 is in LEDGERLOOP_CORS_ORIGINS by default, so it works against this
+  # stack with no extra configuration. Deployment is a Render static site; see DEPLOY.md.
 
 volumes:
   pgdata:

@@ -134,6 +134,21 @@ class ReconciliationResultOut(BaseModel):
     gateway_amount: MoneyField | None = None
     ledger_amount: MoneyField | None = None
 
+    # Both occurrence instants, for the same reason as the amounts above. Layer 2
+    # exists because clocks disagree, so "matched via time drift" is only meaningful
+    # to a reader who can see *by how much* -- and that skew is the difference between
+    # these two fields. Without them the dashboard can name the layer but not show the
+    # evidence for it. Same join, no extra query.
+    gateway_occurred_at: datetime | None = None
+    ledger_occurred_at: datetime | None = None
+
+    @property
+    def skew_ms(self) -> int | None:
+        """Ledger minus gateway, in milliseconds. None unless both sides exist."""
+        if self.gateway_occurred_at is None or self.ledger_occurred_at is None:
+            return None
+        return int((self.ledger_occurred_at - self.gateway_occurred_at).total_seconds() * 1000)
+
     @property
     def amount_delta(self) -> Decimal | None:
         """Ledger minus gateway; None unless both sides exist."""
@@ -171,6 +186,8 @@ class ExceptionOut(BaseModel):
     currency: str | None = None
     gateway_amount: MoneyField | None = None
     ledger_amount: MoneyField | None = None
+    gateway_occurred_at: datetime | None = None
+    ledger_occurred_at: datetime | None = None
 
 
 class ExceptionPage(BaseModel):
@@ -206,7 +223,14 @@ class StatsOut(BaseModel):
     total: int = Field(description="Active results in the window; duplicates excluded.")
     match_rate: float = Field(ge=0.0, le=1.0, description="matched / total; 0.0 when total is 0.")
     latency_ms: LatencyPercentiles
-    throughput_tx_per_sec: float = Field(description="Results resolved per second over the window.")
+    throughput_tx_per_sec: float
+    #: The server's unmatched window, in seconds. Reported because a client cannot
+    #: otherwise tell "not matched yet" from "declared a break": a row with no
+    #: counterparty stays pending until the sweeper has waited this long, so any
+    #: unmatched count read sooner than this after ingestion is still incomplete by
+    #: design. Without it a dashboard has to either guess the window or call a
+    #: deliberate wait a discrepancy.
+    unmatched_after_s: int = Field(description="Results resolved per second over the window.")
     open_exceptions: int
 
 

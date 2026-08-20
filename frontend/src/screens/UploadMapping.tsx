@@ -8,8 +8,8 @@ import {
   type ColumnMap,
   type FieldName,
   type ParsedCsv,
-} from '../engine/csv'
-import type { Side } from '../engine/types'
+} from '../lib/csv'
+import type { Side } from '../api/types'
 import { formatBytes, formatCount } from '../format'
 import {
   Alert,

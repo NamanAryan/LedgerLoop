@@ -1,0 +1,84 @@
+# Layer 5, on somebody else's free tier.
+#
+# Render has no free instance type for cron jobs, so the unmatched sweep runs here
+# instead. This is not a reimplementation: it invokes `python -m ledgerloop.worker.sweep`,
+# the same entry point a Render Cron Job would run, against the same database. Moving
+# it back is a schedule and a `dockerCommand` -- see DEPLOY.md.
+#
+# It is the BACKSTOP, not the primary. The API runs its own sweeper in-process every
+# 30s, which is what makes a break visible inside a demo rather than a quarter of an
+# hour later. This job exists for the window where that process is asleep: it connects
+# straight to Postgres and never touches the API -- the sweeper imports nothing from
+# queue/, so it needs no Redis and no running web service.
+#
+# Safety of running this while the matcher may be asleep: the sweeper attempts a real
+# match on every stale row *before* declaring it unmatched (worker/sweeper.py). A pair
+# that both arrived while the API was down is matched here, not reported as a break.
+# Only genuinely orphaned rows are marked. The window (60s) must stay identical to the
+# API's, because both processes are deciding the same question and a job that waited
+# less would declare breaks the matcher was still entitled to resolve.
+
+name: sweep
+
+on:
+  schedule:
+    # Every 15 minutes, UTC. GitHub queues scheduled workflows on a best-effort basis
+    # and delays them under load, so treat this as "at least every 15 minutes" -- which
+    # is fine, because the sweeper is idempotent and the window absorbs the jitter.
+    #
+    # Minutes budget: ~2,880 runs/month at roughly a minute each. Free for a public
+    # repository. A private one gets 2,000 minutes/month, so switch to '*/30 * * * *'
+    # or '0 * * * *' there and raise LEDGERLOOP_UNMATCHED_AFTER_S to match.
+    - cron: "*/15 * * * *"
+  # So you can prove it works without waiting for a tick.
+  workflow_dispatch:
+
+# Never let two sweeps overlap. They would be safe -- the partial unique indexes make a
+# double sweep a no-op -- but a queue of delayed runs all starting at once is wasted
+# minutes and confusing logs.
+concurrency:
+  group: sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # A sweep that has not finished in five minutes is not going to; failing fast keeps
+    # a hung run from eating the minutes budget and from blocking the next tick.
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install --quiet uv
+
+      - name: Install dependencies
+        working-directory: backend
+        # --frozen: resolve exactly what uv.lock pins, never silently upgrade. This job
+        # writes to the production database; it is not the place to discover a new
+        # transitive version.
+        # --no-dev: pytest and testcontainers have no business in a sweep.
+        run: uv sync --frozen --no-dev
+
+      - name: Sweep
+        working-directory: backend
+        env:
+          # Render's EXTERNAL database URL, from the dashboard. The internal hostname
+          # only resolves inside Render's network. A bare postgresql:// scheme is fine
+          # -- config.py upgrades it to asyncpg.
+          LEDGERLOOP_DATABASE_URL: ${{ secrets.LEDGERLOOP_DATABASE_URL }}
+          # Plain-text logs: the run log is read by a human here, not shipped to a
+          # collector.
+          LEDGERLOOP_LOG_JSON: "false"
+          # Must match the API's setting (render.yaml). If this were lower than the
+          # window the API advertises, the sweep would declare breaks the matcher was
+          # still entitled to resolve.
+          LEDGERLOOP_UNMATCHED_AFTER_S: "60"
+        # No Redis credential: the sweeper is Postgres-only. Non-zero exit fails the
+        # run, which is the health signal -- there is nothing else watching this.
+        run: uv run python -m ledgerloop.worker.sweep

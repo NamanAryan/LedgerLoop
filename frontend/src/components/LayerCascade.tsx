@@ -2,19 +2,23 @@
  * The layer cascade — what each of the five layers actually resolved.
  *
  * A match rate says how much reconciled. It does not say *why*, and "why" is the
- * question an operator asks first: a book that matches 99% at layer 1 is healthy,
- * and a book that matches 99% only after layer 2 rescues it has a clock problem
- * somewhere upstream. The layers run in order, each seeing only what the previous
- * one could not resolve, so the counts below decompose one stream rather than
- * tally five independent ones.
+ * question an operator asks first: a book that matches 99% at layer 1 is healthy, and
+ * a book that matches 99% only after layer 2 rescues it has a clock problem somewhere
+ * upstream. The layers run in order, each seeing only what the previous one could not
+ * resolve, so the counts below decompose one stream rather than tally five.
  *
- * The rule under each row is not decoration: its filled length is that layer's
- * share of every decision the run made, so the five fills sum to the whole
- * stream. The divider is the chart.
+ * Every number here comes from `GET /v1/stats`. The one derivation is layer 1, which
+ * the API does not report directly: it returns `matched` and `matched_via_time_drift`,
+ * and exact is the remainder. That split is only possible because the backend keys the
+ * time-drift count on `match_layer` rather than `status` — both are matches, and
+ * conflating them would hide exactly how much of the match rate leans on tolerance.
+ *
+ * The rule under each row is not decoration: its filled length is that layer's share
+ * of every decision made, so the five fills sum to the whole stream.
  */
 
 import { formatCount, formatPercent } from '../format'
-import type { ReconTotals } from '../engine/types'
+import type { StatsOut } from '../api/types'
 import { Numeral } from './primitives'
 
 interface Layer {
@@ -24,36 +28,41 @@ interface Layer {
   fill: string
 }
 
-export function LayerCascade({ totals }: { totals: ReconTotals }) {
+export function LayerCascade({ stats }: { stats: StatsOut }) {
+  // Matched, minus the ones that needed layer 2. Clamped at zero: the two figures are
+  // read from one query so they cannot legitimately disagree, but a negative bar from
+  // an unexpected server response would be a worse bug than a flat one.
+  const exact = Math.max(stats.matched - stats.matched_via_time_drift, 0)
+
   const layers: Layer[] = [
     {
       name: 'Exact',
       rule: 'Same amount, within two seconds',
-      count: totals.matchedExact,
+      count: exact,
       fill: 'bg-sage',
     },
     {
       name: 'Time drift',
       rule: 'Same amount, within sixty seconds',
-      count: totals.matchedTimeDrift,
+      count: stats.matched_via_time_drift,
       fill: 'bg-sage/60',
     },
     {
       name: 'Amount drift',
       rule: 'Inside tolerance, flagged for review',
-      count: totals.amountDrift,
+      count: stats.drift,
       fill: 'bg-rose',
     },
     {
       name: 'Duplicate',
       rule: 'Repeat idempotency key',
-      count: totals.duplicates,
+      count: stats.duplicates,
       fill: 'bg-gold',
     },
     {
       name: 'Sweep',
       rule: 'No counterparty found on either side',
-      count: totals.unmatchedGateway + totals.unmatchedLedger,
+      count: stats.unmatched,
       fill: 'bg-rose/60',
     },
   ]
@@ -74,9 +83,7 @@ export function LayerCascade({ totals }: { totals: ReconTotals }) {
             <div className="flex items-baseline justify-between gap-4">
               <div className="flex items-baseline gap-5">
                 <Numeral n={index + 1} className="w-6 shrink-0" />
-                <h3 className="text-base font-normal tracking-tight text-cream">
-                  {layer.name}
-                </h3>
+                <h3 className="text-base font-normal tracking-tight text-cream">{layer.name}</h3>
               </div>
               <div className="shrink-0 font-display text-2xl font-light leading-none text-cream">
                 {formatCount(layer.count)}

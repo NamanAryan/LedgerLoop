@@ -7,9 +7,9 @@
  */
 
 import { Link, useNavigate } from 'react-router-dom'
-import type { ColumnMap } from '../engine/csv'
-import type { GeneratorConfig } from '../engine/generate'
-import type { Side } from '../engine/types'
+import type { ColumnMap } from '../lib/csv'
+import type { GeneratorConfig } from '../lib/generate'
+import type { Side } from '../api/types'
 import { Alert, PageHead, Segmented } from '../components/primitives'
 import { TestDataPanel } from './TestDataControls'
 import { UploadPanel, type UploadedFile } from './UploadMapping'

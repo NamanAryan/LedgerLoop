@@ -17,6 +17,7 @@ from ledgerloop.config import Settings, get_settings
 from ledgerloop.db.session import build_engine, build_sessionmaker
 from ledgerloop.observability.logging import configure_logging, get_logger
 from ledgerloop.queue.streams import StreamClient, build_redis
+from ledgerloop.worker.embedded import EmbeddedWorker
 
 log = get_logger("ledgerloop.api")
 
@@ -44,10 +45,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # events, and the relay drains them once Redis returns.
             log.warning("stream.group_create_failed", error=str(exc))
 
-        log.info("api.started", service=settings.service_name)
+        # Free-tier concession, off by default: host the matcher, relay and sweeper on
+        # this event loop instead of in their own container. See worker/embedded.py for
+        # what that gives up -- the short version is ingestion latency stops being
+        # isolated from matching load. Correctness is unaffected either way.
+        embedded: EmbeddedWorker | None = None
+        if settings.embed_worker:
+            embedded = EmbeddedWorker(app.state.sessionmaker, app.state.stream, settings)
+            await embedded.start()
+        app.state.embedded = embedded
+
+        log.info("api.started", service=settings.service_name, embedded_worker=embedded is not None)
         try:
             yield
         finally:
+            # Drain the loops before the pool they are using goes away, or a matcher
+            # mid-write meets a disposed engine and the message is redelivered for no
+            # reason. Ordering here is the whole point of doing it in the lifespan.
+            if embedded is not None:
+                await embedded.stop()
             await redis.aclose()
             await engine.dispose()
             log.info("api.stopped")

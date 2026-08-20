@@ -1,21 +1,25 @@
 /**
  * The transaction feed.
  *
- * Rows are rendered in pages against a stable sort rather than all at once. A 50,000
- * row result is roughly 350,000 DOM nodes if rendered whole, which is enough to make
- * the tab unresponsive for seconds — and no operator reads row 12,000 anyway. The
- * cursor is a position in the sorted result, and because the sort is total (time,
- * then txn_id) advancing it can never skip or repeat a row.
+ * Pagination is the API's, not this component's. The backend pages by keyset — `WHERE
+ * id < :cursor ORDER BY id DESC LIMIT :n` — so page 1000 costs exactly what page 1
+ * costs, and "load more" appends the next page rather than re-fetching a larger slice.
+ * The cursor is opaque here: it is handed back exactly as received and never parsed,
+ * because the moment a client starts doing arithmetic on a cursor the server can no
+ * longer change what one means.
+ *
+ * The old version sliced a locally-computed array. There is no local array now — rows
+ * exist only as far as they have been fetched, which is also why the footer says how
+ * many are loaded rather than how many exist. Claiming a total the server never sent
+ * would be a guess.
  */
 
-import { Fragment, useEffect, useState } from 'react'
-import { formatMoney } from '../engine/money'
-import type { ReconRow } from '../engine/types'
+import { Fragment, useState } from 'react'
+import type { ExceptionOut, ReconciliationResultOut } from '../api/types'
+import { formatAmount } from '../lib/money'
 import { formatClock, formatCount, formatSkew } from '../format'
-import { ExceptionDetail, type Resolution } from './ExceptionDetail'
+import { ExceptionDetail, skewMs, toDetailRow } from './ExceptionDetail'
 import { Button, Eyebrow, StatusPill } from './primitives'
-
-const PAGE_SIZE = 100
 
 const LAYER_SHORT: Record<string, string> = {
   exact: 'Exact',
@@ -31,25 +35,23 @@ const COLUMNS =
 
 export function TransactionTable({
   rows,
+  exceptionsByResultId,
   emptyMessage,
-  resolutions,
-  onResolutionChange,
-  resetKey,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  onResolved,
 }: {
-  rows: ReconRow[]
+  rows: ReconciliationResultOut[]
+  /** Open/closed exception state, keyed by reconciliation_result_id. */
+  exceptionsByResultId: Map<number, ExceptionOut>
   emptyMessage: string
-  resolutions: Record<number, Resolution>
-  onResolutionChange: (id: number, next: Resolution) => void
-  /** Changing this rewinds the cursor — a new filter starts at the top. */
-  resetKey: string
+  hasMore: boolean
+  loadingMore: boolean
+  onLoadMore: () => void
+  onResolved: () => void
 }) {
-  const [cursor, setCursor] = useState(PAGE_SIZE)
   const [expanded, setExpanded] = useState<number | null>(null)
-
-  useEffect(() => {
-    setCursor(PAGE_SIZE)
-    setExpanded(null)
-  }, [resetKey])
 
   if (rows.length === 0) {
     return (
@@ -58,8 +60,6 @@ export function TransactionTable({
       </p>
     )
   }
-
-  const visible = rows.slice(0, cursor)
 
   return (
     <>
@@ -75,14 +75,13 @@ export function TransactionTable({
             <Eyebrow>Layer</Eyebrow>
           </div>
 
-          {visible.map((row) => {
+          {rows.map((row) => {
             const isOpen = expanded === row.id
-            const resolution = resolutions[row.id] ?? {
-              reason: 'Unreviewed',
-              note: '',
-              resolvedAt: null,
-            }
-            const amount = row.gateway?.amount ?? row.ledger?.amount ?? 0
+            const detail = toDetailRow(row)
+            const exception = exceptionsByResultId.get(row.id) ?? null
+            // Either side's amount, for the headline column. They agree except on a
+            // drift row, which is exactly what the Difference column is for.
+            const amount = row.gateway_amount ?? row.ledger_amount
 
             return (
               <Fragment key={row.id}>
@@ -95,29 +94,35 @@ export function TransactionTable({
                   <span>
                     <StatusPill status={row.status} />
                   </span>
-                  <span className="truncate text-cream">{row.txnId}</span>
+                  <span className="truncate text-cream">{row.txn_id ?? '—'}</span>
                   <span className="text-slate">
-                    {row.gateway ? formatClock(row.gateway.occurredAt) : '—'}
+                    {row.gateway_occurred_at
+                      ? formatClock(Date.parse(row.gateway_occurred_at))
+                      : '—'}
                   </span>
                   <span className="text-slate">
-                    {row.ledger ? formatClock(row.ledger.occurredAt) : '—'}
+                    {row.ledger_occurred_at ? formatClock(Date.parse(row.ledger_occurred_at)) : '—'}
                   </span>
                   <span className="text-right text-ash">
-                    {formatMoney(amount, row.currency)}
+                    {formatAmount(amount, row.currency)}
                   </span>
                   <span
-                    className={`truncate ${row.amountDelta ? 'text-rose' : 'text-slate'}`}
+                    className={`truncate ${row.status === 'amount_drift' ? 'text-rose' : 'text-slate'}`}
                   >
                     {renderDifference(row)}
                   </span>
-                  <span className="text-slate">{LAYER_SHORT[row.layer] ?? row.layer}</span>
+                  <span className="text-slate">
+                    {LAYER_SHORT[row.match_layer] ?? row.match_layer}
+                  </span>
                 </button>
 
                 {isOpen && (
                   <ExceptionDetail
-                    row={row}
-                    resolution={resolution}
-                    onChange={(next) => onResolutionChange(row.id, next)}
+                    row={detail}
+                    exceptionId={exception?.id ?? null}
+                    closedAt={exception?.closed_at ?? null}
+                    resolutionNotes={exception?.resolution_notes ?? null}
+                    onResolved={onResolved}
                   />
                 )}
               </Fragment>
@@ -128,11 +133,12 @@ export function TransactionTable({
 
       <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-5 sm:px-8">
         <span className="text-xs font-light text-slate">
-          Showing {formatCount(visible.length)} of {formatCount(rows.length)} rows
+          {formatCount(rows.length)} rows loaded
+          {hasMore ? '' : ' · end of feed'}
         </span>
-        {cursor < rows.length && (
-          <Button size="sm" onClick={() => setCursor((current) => current + PAGE_SIZE)}>
-            Load {formatCount(Math.min(PAGE_SIZE, rows.length - cursor))} more
+        {hasMore && (
+          <Button size="sm" onClick={onLoadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load more'}
           </Button>
         )}
       </div>
@@ -145,18 +151,18 @@ export function TransactionTable({
  * A drift row shows both amounts so the size of the break is legible without opening
  * anything; a matched row that needed layer 2 shows the clock offset that made it so.
  */
-function renderDifference(row: ReconRow) {
-  if (row.status === 'amount_drift' && row.gateway && row.ledger) {
+function renderDifference(row: ReconciliationResultOut) {
+  if (row.status === 'amount_drift' && row.gateway_amount && row.ledger_amount) {
     return (
       <>
-        {formatMoney(row.gateway.amount, row.currency)} ≠{' '}
-        {formatMoney(row.ledger.amount, row.currency)}
+        {formatAmount(row.gateway_amount, row.currency)} ≠{' '}
+        {formatAmount(row.ledger_amount, row.currency)}
       </>
     )
   }
   if (row.status === 'duplicate') return 'Repeat submission'
   if (row.status === 'unmatched_gateway_only') return 'No ledger entry'
   if (row.status === 'unmatched_ledger_only') return 'No gateway entry'
-  if (row.layer === 'time_drift' && row.skewMs !== null) return formatSkew(row.skewMs)
-  return row.skewMs !== null ? formatSkew(row.skewMs) : '—'
+  const skew = skewMs(toDetailRow(row))
+  return skew !== null ? formatSkew(skew) : '—'
 }

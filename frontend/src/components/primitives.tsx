@@ -7,7 +7,7 @@
  */
 
 import type { ReactNode } from 'react'
-import type { ReconStatus } from '../engine/types'
+import type { ReconStatus } from '../api/types'
 
 /* --- labels --------------------------------------------------------------- */
 
@@ -158,10 +158,19 @@ const PILL: Record<ReconStatus, { label: string; tone: string }> = {
     label: 'Ledger only',
     tone: 'text-rose border-rose/30 bg-rose/10',
   },
+  // Reserved in the backend's enum but never written today: layer 2 resolves to
+  // `matched` with match_layer=time_drift, because a payment that reconciles 40s late
+  // is still a reconciled payment. The pill exists so that if the server's policy ever
+  // flips, the UI renders it instead of crashing on an unmapped status.
+  time_drift: { label: 'Time drift', tone: 'text-gold border-gold/30 bg-gold/10' },
 }
 
+const UNKNOWN_PILL = { label: 'Unknown', tone: 'text-slate border-line-2 bg-ink-2' }
+
 export function StatusPill({ status }: { status: ReconStatus }) {
-  const { label, tone } = PILL[status]
+  // Indexed defensively: a status this build has never heard of should render as
+  // itself, not throw. The server owns this enum and can add to it before we redeploy.
+  const { label, tone } = PILL[status] ?? { ...UNKNOWN_PILL, label: status }
   return (
     <span
       className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] ${tone}`}

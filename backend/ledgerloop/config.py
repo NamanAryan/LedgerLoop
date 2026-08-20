@@ -109,6 +109,26 @@ class Settings(BaseSettings):
     worker_concurrency: int = 1
     worker_metrics_port: int = 9100
 
+    #: Run the matcher (and whichever of relay/sweeper are enabled) inside the API
+    #: process instead of as their own deployment.
+    #:
+    #: Off by default, and it should stay off anywhere that can afford a second
+    #: process. It gives up exactly what worker/main.py exists to provide: a slow
+    #: match now shares the API's event loop, so a matching backlog shows up as slow
+    #: webhook responses, and the gateway starts retrying transactions that were never
+    #: lost. The two also stop scaling independently.
+    #:
+    #: It exists because free hosting tiers price a second always-on process at more
+    #: than zero, and a demo that runs is worth more than a topology that doesn't. The
+    #: honest framing is that this is a deployment concession, not a design: the code
+    #: path is identical, only the process boundary moves.
+    #:
+    #: Requires a single API worker process. With `uvicorn --workers N` each worker
+    #: would start its own matcher and relay -- correctness survives that (the consumer
+    #: group and the partial unique indexes both hold) but it multiplies the polling
+    #: for no gain.
+    embed_worker: bool = False
+
     # --- API edge ---------------------------------------------------------
     #: Browser origins allowed to call the read path. The dashboard is served from a
     #: different origin than the API in every deployment shape we support (Vite on
