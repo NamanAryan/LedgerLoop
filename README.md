@@ -10,6 +10,22 @@ can prove it reconciled correctly.
 
 ---
 
+## Live demo
+
+| | |
+|---|---|
+| Dashboard | <https://ledger-loop-ivory.vercel.app> |
+| API docs | <https://ledgerloop-api.onrender.com/docs> |
+
+Both halves run on free tiers, which shapes what you will see. The API sleeps after
+15 minutes with no traffic, so the first request after a quiet period pays a cold
+start of roughly a minute — the dashboard pings `/health` on load to start that clock
+while you are still reading the landing page. The matcher runs *inside* the API
+process there (`LEDGERLOOP_EMBED_WORKER`), because Render has no free background
+worker; see [Deploy](#deploy) for what that costs.
+
+---
+
 ## The problem
 
 A merchant's ledger and their gateway's webhook feed never agree in real time. Webhooks
@@ -163,38 +179,60 @@ a green suite against a fake would prove nothing about what actually ships. Sche
 from `alembic upgrade head`, so the tests exercise the same migration chain production
 runs.
 
-## Deploy to Railway in 5 minutes
+## Deploy
 
-1. **Create the project.** `railway init` (or New Project → Deploy from GitHub repo).
-2. **Add the datastores.** `railway add --database postgres` and
-   `railway add --database redis`. Railway injects `DATABASE_URL` and `REDIS_URL`.
-3. **Point the app at them.** LedgerLoop reads `LEDGERLOOP_`-prefixed variables, and it
-   needs the asyncpg driver in the DSN:
+`render.yaml` is the blueprint this project actually runs on: Postgres, a Key Value
+(Redis) instance, and one web service holding the API. Render has no free background
+worker, so the matcher, relay and sweeper move onto the API's event loop via
+`LEDGERLOOP_EMBED_WORKER`. That is a deployment concession, not a redesign — the loops
+are the same objects driven by the same shutdown protocol, and the paid topology is one
+env var plus a service block away. What it gives up is isolation: a matching backlog
+now shows up as slow webhook responses.
 
-   ```bash
-   railway variables \
-     --set 'LEDGERLOOP_DATABASE_URL=${{Postgres.DATABASE_URL}}' \
-     --set 'LEDGERLOOP_REDIS_URL=${{Redis.REDIS_URL}}' \
-     --set 'LEDGERLOOP_LOG_JSON=true'
-   ```
+The dashboard deploys separately to Vercel from `frontend/`, where `vercel.json`
+declares the Vite build and the SPA rewrite.
 
-   The Postgres URL arrives as `postgresql://`. Change the scheme to
-   `postgresql+asyncpg://` — the engine refuses to start otherwise, deliberately, rather
-   than silently falling back to a sync driver that would block the event loop.
-4. **Deploy the API.** `railway up`. `railway.json` builds `backend/Dockerfile`, runs
-   `alembic upgrade head` on start, and health-checks `/health`.
-5. **Deploy the worker.** Add a second service from the same repo with start command
-   `python -m ledgerloop.worker.main`. It needs the same two variables. This is a separate
-   service on purpose — the API scales on request rate, the matcher on stream depth.
+### The two variables that couple the halves
 
-Any browser client calling the API from another origin needs that origin listed in
-`LEDGERLOOP_CORS_ORIGINS` (comma-separated).
+Both are read at **build or boot time**, so neither can be fixed by a restart alone,
+and both fail as an opaque browser network error rather than as anything legible.
 
-Fly.io is equivalent: `fly deploy` for the API (`fly.toml`) and
-`fly deploy -c fly.worker.toml` for the matcher. The Fly config runs migrations as a
-`release_command`, which blocks the release if they fail.
+| Host | Variable | Value |
+|------|----------|-------|
+| Vercel (build time) | `VITE_API_BASE_URL` | the API's base URL, no trailing slash |
+| Render (boot time) | `LEDGERLOOP_CORS_ORIGINS` | every browser origin, comma-separated |
 
-> **Free-tier note.** Railway's free Postgres and Redis are shared instances. The
+**`VITE_API_BASE_URL` is substituted into the bundle by `vite build`.** Setting it in
+the dashboard does nothing to an existing deployment; you need a rebuild with the build
+cache disabled. Left unset, the client falls back to `http://localhost:8000`
+(`api/client.ts`) — and because browsers treat `localhost` as a trustworthy origin, that
+request is *not* blocked as mixed content. It quietly goes to the visitor's own machine.
+
+**`LEDGERLOOP_CORS_ORIGINS` must name the frontend's origin**, never the API's own URL —
+a service never sends an `Origin` header naming itself. Setting it *replaces* the
+localhost defaults rather than extending them, so list the dev origins too if you want
+`npm run dev` to keep reaching the deployed API. An unlisted origin gets a bare `400`
+with no `Access-Control-Allow-Origin`, which the browser surfaces only as
+"NetworkError" — the request never reaches your handler, so nothing appears in the API
+logs either. `api.started` logs the resolved allowlist at boot for exactly this reason.
+
+Vercel gives every preview deployment its own hostname, which will not be on the
+allowlist. Test on the production domain.
+
+### Other hosts
+
+Fly.io is a first-class alternative and keeps the worker as its own process:
+`fly deploy` for the API (`fly.toml`) and `fly deploy -c fly.worker.toml` for the
+matcher. The Fly config runs migrations as a `release_command`, which blocks the
+release if they fail.
+
+Anywhere else, the contract is the same three things: build `backend/Dockerfile`, run
+`alembic upgrade head` before serving, and supply `LEDGERLOOP_`-prefixed variables. The
+DSN must be `postgresql+asyncpg://` — managed providers hand out `postgresql://` (or
+Heroku's older `postgres://`), and the config layer upgrades those two schemes rather
+than starting on a sync driver that would block the event loop.
+
+> **Free-tier note.** Free Postgres and Redis instances are shared and small. The
 > benchmark numbers below were produced locally; free-tier throughput will be lower, and
 > is bounded by the datastore, not by LedgerLoop.
 
@@ -270,4 +308,15 @@ backend/
     observability/  structured logging, Prometheus metrics
   scripts/          load generator, benchmark harness
   tests/
+
+frontend/
+  src/
+    api/            HTTP client, ingestion pacing, generated API types
+    screens/        landing, upload/mapping, reconcile, dashboard
+    components/     table, layer cascade, exception detail
+    lib/            CSV parsing, money handling, synthetic data generator
 ```
+
+The dashboard is a pure client: it posts both sides through the API and renders what
+the API returns. There is no matching engine in the browser — the five layers exist
+once, in `backend/ledgerloop/matching/`.
