@@ -66,6 +66,7 @@ jobs:
         run: uv sync --frozen --no-dev
 
       - name: Sweep
+        if: ${{ secrets.LEDGERLOOP_DATABASE_URL != '' }}
         working-directory: backend
         env:
           # Render's EXTERNAL database URL, from the dashboard. The internal hostname
@@ -82,3 +83,7 @@ jobs:
         # No Redis credential: the sweeper is Postgres-only. Non-zero exit fails the
         # run, which is the health signal -- there is nothing else watching this.
         run: uv run python -m ledgerloop.worker.sweep
+
+      - name: Skip when database secret is missing
+        if: ${{ secrets.LEDGERLOOP_DATABASE_URL == '' }}
+        run: "echo 'Skipping sweep: LEDGERLOOP_DATABASE_URL secret is not configured.'"
