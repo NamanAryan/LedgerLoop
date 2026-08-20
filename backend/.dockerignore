@@ -1,0 +1,31 @@
+# Build context exclusions.
+#
+# Without this file the whole backend directory is uploaded to the builder on every
+# deploy -- including .venv (hundreds of MB) and the mypy cache (a dozen SQLite
+# files). None of it is COPYed into the image, so it is pure upload time, and on a
+# hosted builder that upload is the slowest part of a deploy.
+
+# Virtualenvs. The image builds its own via `uv sync`.
+.venv/
+venv/
+
+# Python bytecode and tool caches.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets. Never in an image; config comes from the environment in every deployment.
+.env
+.env.*
+
+# Tests run in CI against real containers, never inside the runtime image.
+tests/
+
+# Editor and OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

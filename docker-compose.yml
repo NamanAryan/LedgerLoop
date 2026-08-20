@@ -142,16 +142,14 @@ services:
       api:
         condition: service_healthy
 
-  # The ops console: three static files behind nginx, which also reverse-proxies /v1 to
-  # the API. Serving both from one origin is what lets the console ship with no API base
-  # URL and no CORS involvement -- see frontend/nginx.conf.
-  dashboard:
-    build: ./frontend
-    ports:
-      - "5173:8080"
-    depends_on:
-      api:
-        condition: service_healthy
+  # No dashboard service. The old ops console was three static files behind nginx that
+  # reverse-proxied /v1 to the API; frontend/ is now a standalone React SPA that calls
+  # no API at all -- the matching engine is a TypeScript port running in a Web Worker.
+  # It has no Dockerfile and needs none:
+  #
+  #   cd frontend && npm install && npm run dev     -> http://localhost:5173
+  #
+  # It deploys to Vercel as static output, independently of this stack. See DEPLOY.md.
 
 volumes:
   pgdata:

@@ -13,3 +13,6 @@ dist/
 # Local environment
 .env
 *.local
+
+# Personal prep notes, not part of the project
+interview.md

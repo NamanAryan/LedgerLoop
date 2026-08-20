@@ -1,0 +1,187 @@
+# Render blueprint. `render.yaml` at the repo root; Render reads it on Blueprint deploy.
+#
+# Five resources, and the split between them is the same one the architecture already
+# makes -- this file does not invent a topology, it expresses the existing one:
+#
+#   ledgerloop-db       PostgreSQL. The record of truth.
+#   ledgerloop-redis    Key Value (Redis). The transport, not storage.
+#   ledgerloop-api      Web service. Ingestion + read path. Scales on request rate.
+#   ledgerloop-matcher  Background worker. Matcher + outbox relay. Scales on stream depth.
+#   ledgerloop-sweeper  Cron job. Layer 5, the unmatched sweep.
+#
+# The sweeper is a cron job rather than a loop inside the worker because Render already
+# owns a scheduler, and `LEDGERLOOP_ENABLE_SWEEPER=false` was built for exactly this:
+# "the relay and sweeper ride along in the worker container by default; both can be
+# switched off so they can be run as their own deployments instead" (config.py).
+# Note the consequence: the sweeper's *own* window is still 5 minutes, so a break is
+# detected up to schedule-interval + unmatched_after_s after it happens. Shorten the
+# schedule before shortening the window -- the window is a correctness knob (it must
+# exceed worst-case match latency or the sweeper reports a counterparty that did
+# arrive), the schedule is only a latency knob.
+#
+# Region: every resource must name the SAME region or they cross the public internet
+# and lose private networking. Change all five together, or none.
+
+databases:
+  - name: ledgerloop-db
+    databaseName: ledgerloop
+    user: ledgerloop
+    region: singapore
+    plan: free
+    # Pinned to the version docker-compose and the test containers run. The suite's
+    # guarantees are about PostgreSQL-specific behaviour -- partial unique indexes,
+    # FOR UPDATE SKIP LOCKED, percentile_cont -- so testing a different major than we
+    # deploy would make them hollow.
+    postgresMajorVersion: "15"
+
+services:
+  # --- Redis ---------------------------------------------------------------
+  - type: keyvalue
+    name: ledgerloop-redis
+    region: singapore
+    plan: free
+    # Internal only. Nothing outside Render has any business reaching the stream.
+    ipAllowList: []
+    # noeviction, deliberately, and this is the important line in the file.
+    #
+    # Under allkeys-lru a full instance silently drops stream entries. The transactions
+    # they pointed at are still in Postgres, so the sweeper would eventually classify
+    # them as unmatched -- fabricating breaks for payments that reconcile fine, which
+    # is this project's worst failure mode.
+    #
+    # Under noeviction XADD fails loudly instead. The outbox rows stay unpublished, the
+    # relay retries them, and ledgerloop_outbox_backlog climbs where you can see it.
+    # Nothing is lost; the failure is visible rather than invented.
+    maxmemoryPolicy: noeviction
+
+  # --- API -----------------------------------------------------------------
+  - type: web
+    name: ledgerloop-api
+    runtime: docker
+    region: singapore
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+
+    # Migrations run here because Render's preDeployCommand needs a paid instance
+    # type. It is safe at ONE instance and only at one: Alembic takes no lock that
+    # would make N replicas racing `upgrade head` on boot safe.
+    #
+    # The moment you scale this service past 1, or move it to a paid plan, switch to:
+    #   preDeployCommand: alembic upgrade head
+    # and drop the `alembic upgrade head &&` from the line below. That is the Render
+    # equivalent of compose's one-shot `migrate` service and fly.toml's release_command.
+    #
+    # `exec` so uvicorn replaces the shell and receives SIGTERM directly -- without it
+    # the shell holds PID 1, swallows the signal, and every deploy is a hard kill.
+    dockerCommand: 'sh -c "alembic upgrade head && exec uvicorn ledgerloop.api.app:app --host 0.0.0.0 --port $PORT"'
+
+    # /health, not /ready. Render's health check restarts an unhealthy service, which
+    # makes it a liveness probe -- and wiring a dependency check into liveness is how a
+    # brief database blip turns into a restart loop. /ready still exists and still
+    # reports Postgres and Redis; it is for a load balancer, which Render's is not.
+    healthCheckPath: /health
+
+    envVars:
+      - key: LEDGERLOOP_DATABASE_URL
+        fromDatabase:
+          name: ledgerloop-db
+          property: connectionString
+      - key: LEDGERLOOP_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: ledgerloop-redis
+          property: connectionString
+      - key: LEDGERLOOP_LOG_JSON
+        value: "true"
+      # Neither background loop belongs in the API process. The relay lives in the
+      # worker; the sweeper is the cron job below. Running either per-API-replica
+      # would multiply the same work across every replica.
+      - key: LEDGERLOOP_ENABLE_RELAY
+        value: "false"
+      - key: LEDGERLOOP_ENABLE_SWEEPER
+        value: "false"
+      # The free Key Value plan is 25MB. The 1,000,000 default would let Redis hit its
+      # memory ceiling long before MAXLEN ever trimmed, turning a bounded-by-design
+      # buffer into an out-of-memory. Raise this with the plan, not on its own.
+      - key: LEDGERLOOP_STREAM_MAXLEN
+        value: "50000"
+      # Set after the Vercel deploy, to the frontend's real origin. sync:false keeps
+      # Render from overwriting a dashboard edit on the next blueprint sync.
+      # The shipped web app calls no API at all, so this matters only if you point a
+      # browser client at this service -- but /docs "Try it out" is one of those.
+      - key: LEDGERLOOP_CORS_ORIGINS
+        sync: false
+
+  # --- Matcher worker ------------------------------------------------------
+  # No port, no health check: it serves no HTTP, it consumes a Redis Stream. Scaling is
+  # instance count -- the consumer group coordinates, so N workers never double-process
+  # a message, and the partial unique indexes catch it at the database if they race.
+  - type: worker
+    name: ledgerloop-matcher
+    runtime: docker
+    region: singapore
+    # Background workers have no free instance type. This is the one unavoidable
+    # running cost in the blueprint; see DEPLOY.md for the cheaper-but-worse options.
+    plan: starter
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python -m ledgerloop.worker.main
+    envVars:
+      - key: LEDGERLOOP_DATABASE_URL
+        fromDatabase:
+          name: ledgerloop-db
+          property: connectionString
+      - key: LEDGERLOOP_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: ledgerloop-redis
+          property: connectionString
+      - key: LEDGERLOOP_LOG_JSON
+        value: "true"
+      # The relay rides here: it is a background loop like the matcher, it shares the
+      # connection pool, and one instance of it is enough. If you scale this worker
+      # past 1, the relay scales with it -- which is fine and needs no configuration,
+      # because FOR UPDATE SKIP LOCKED lets N relays drain one outbox without blocking.
+      - key: LEDGERLOOP_ENABLE_RELAY
+        value: "true"
+      # Off: the cron job below owns layer 5. Leaving it true would run the sweep twice
+      # over -- harmless (the unique indexes absorb it) but pure wasted database load.
+      - key: LEDGERLOOP_ENABLE_SWEEPER
+        value: "false"
+      - key: LEDGERLOOP_STREAM_MAXLEN
+        value: "50000"
+
+  # --- Sweeper cron --------------------------------------------------------
+  # Layer 5. Every 5 minutes, UTC.
+  #
+  # This is also the repair path, and on the free Key Value plan that is not
+  # theoretical: it has no persistence, so a Redis restart loses the stream. The rows
+  # are all still in Postgres. The worker recreates the consumer group on NOGROUP, and
+  # this job re-attempts a real match on every stale row before declaring any of them
+  # a break -- which is why an unmatched count survives a Redis wipe intact.
+  - type: cron
+    name: ledgerloop-sweeper
+    runtime: docker
+    region: singapore
+    plan: starter
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    schedule: "*/5 * * * *"
+    dockerCommand: python -m ledgerloop.worker.sweep
+    envVars:
+      - key: LEDGERLOOP_DATABASE_URL
+        fromDatabase:
+          name: ledgerloop-db
+          property: connectionString
+      # No LEDGERLOOP_REDIS_URL on purpose. The sweeper reads and writes Postgres and
+      # never touches the stream -- worker/sweeper.py imports nothing from queue/ --
+      # so handing it a Redis credential would be scope it does not use. The setting
+      # keeps its harmless default and no connection is ever opened.
+      - key: LEDGERLOOP_LOG_JSON
+        value: "true"
+      # The production window, stated explicitly rather than inherited. This is the
+      # number that decides what counts as a break, and it should be legible in the
+      # deployment config rather than only in a Python default.
+      - key: LEDGERLOOP_UNMATCHED_AFTER_S
+        value: "300"

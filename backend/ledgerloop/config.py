@@ -25,13 +25,46 @@ class Settings(BaseSettings):
     # --- Infrastructure -------------------------------------------------
     database_url: PostgresDsn = Field(
         default="postgresql+asyncpg://ledgerloop:ledgerloop@localhost:5432/ledgerloop",
-        description="Async SQLAlchemy DSN. Must use the asyncpg driver.",
+        description=(
+            "Async SQLAlchemy DSN. A bare postgres:// or postgresql:// scheme is "
+            "upgraded to postgresql+asyncpg://; any other driver is rejected."
+        ),
     )
     redis_url: RedisDsn = Field(default="redis://localhost:6379/0")
 
     db_pool_size: int = 10
     db_max_overflow: int = 5
     db_echo: bool = False
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _require_async_driver(cls, value: object) -> object:
+        """Pin the DSN to asyncpg, upgrading a managed provider's scheme if needed.
+
+        Render, Railway, Heroku and Neon all inject ``postgresql://`` (Heroku still
+        emits the older ``postgres://``), and none of them offer a way to rewrite it
+        on the way out. SQLAlchemy reads a bare scheme as psycopg2 -- a *sync* driver,
+        which would block the event loop under load and surface as mysterious latency
+        rather than as a configuration error.
+
+        Rewriting the scheme is not the silent fallback this project refuses. The
+        fallback worth refusing is falling *back* to sync, and an explicitly sync DSN
+        is still rejected below -- loudly, at startup, which is the only moment anyone
+        can act on it.
+        """
+        if not isinstance(value, str):
+            return value
+        scheme, separator, rest = value.partition("://")
+        if not separator:
+            return value
+        if scheme in {"postgres", "postgresql"}:
+            return f"postgresql+asyncpg://{rest}"
+        if scheme.startswith("postgresql+") and scheme != "postgresql+asyncpg":
+            raise ValueError(
+                f"database_url must use the asyncpg driver, got {scheme!r}. The engine "
+                "is async end to end; a sync driver would block the event loop."
+            )
+        return value
 
     # --- Redis Stream ---------------------------------------------------
     stream_key: str = "ledgerloop:ingest"
