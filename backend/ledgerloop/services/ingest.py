@@ -5,10 +5,16 @@ where the idempotency guarantee actually lives.
 
 The shape of every write here is:
 
-    INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING id
+    INSERT ... ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING id
+
+The conflict target is ``(tenant_id, idempotency_key)``, not the key alone. Keys are
+chosen by the client, so two tenants will eventually pick the same string; a global
+target would answer the second tenant's genuine payment with ``duplicate: true`` and
+store nothing at all, with no error anywhere to notice.
 
 If a row comes back, this is a first receipt. If nothing comes back, the key was
-already present -- a retry -- and we bump ``duplicate_count`` instead. Both paths
+already present *for this tenant* -- a retry -- and we bump ``duplicate_count``
+instead. Both paths
 then write an outbox row, so both paths produce exactly one stream message, and the
 caller gets a 202 either way.
 
@@ -32,6 +38,7 @@ from ledgerloop.api.schemas import GatewayWebhookIn, LedgerEntryIn
 from ledgerloop.db.enums import IngestSource
 from ledgerloop.db.models import GatewayTransaction, LedgerEntry, OutboxEvent
 from ledgerloop.queue.messages import IngestMessage
+from ledgerloop.services.tenancy import Tenant
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +50,11 @@ class IngestOutcome:
 
 
 async def ingest_gateway(
-    session: AsyncSession, payload: GatewayWebhookIn, idempotency_key: str, raw_body: dict[str, Any]
+    session: AsyncSession,
+    tenant: Tenant,
+    payload: GatewayWebhookIn,
+    idempotency_key: str,
+    raw_body: dict[str, Any],
 ) -> IngestOutcome:
     """Store one gateway transaction. Caller owns the transaction boundary.
 
@@ -55,6 +66,7 @@ async def ingest_gateway(
     insert_stmt = (
         pg_insert(GatewayTransaction)
         .values(
+            tenant_id=tenant.account_id,
             txn_id=payload.txn_id,
             amount=payload.amount,
             currency=payload.currency,
@@ -63,7 +75,7 @@ async def ingest_gateway(
             raw_payload=raw_body,
             idempotency_key=idempotency_key,
         )
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .on_conflict_do_nothing(index_elements=["tenant_id", "idempotency_key"])
         .returning(GatewayTransaction.id)
     )
     row_id: int | None = (await session.execute(insert_stmt)).scalar_one_or_none()
@@ -77,7 +89,10 @@ async def ingest_gateway(
         # is never rewritten, because the first receipt is the record of what arrived.
         bump = (
             update(GatewayTransaction)
-            .where(GatewayTransaction.idempotency_key == idempotency_key)
+            .where(
+                GatewayTransaction.tenant_id == tenant.account_id,
+                GatewayTransaction.idempotency_key == idempotency_key,
+            )
             .values(duplicate_count=GatewayTransaction.duplicate_count + 1)
             .returning(GatewayTransaction.id, GatewayTransaction.duplicate_count)
         )
@@ -94,7 +109,7 @@ async def ingest_gateway(
 
 
 async def ingest_ledger_batch(
-    session: AsyncSession, entries: list[LedgerEntryIn]
+    session: AsyncSession, tenant: Tenant, entries: list[LedgerEntryIn]
 ) -> list[IngestOutcome]:
     """Store a batch of ledger entries. Two statements for the whole batch, not two
     per entry: at 1000 entries the per-row version is 2000 round trips, which is the
@@ -118,6 +133,7 @@ async def ingest_ledger_batch(
         .values(
             [
                 {
+                    "tenant_id": tenant.account_id,
                     "entry_id": entry.entry_id,
                     "txn_id": entry.txn_id,
                     "amount": entry.amount,
@@ -129,7 +145,7 @@ async def ingest_ledger_batch(
                 for entry in first_by_key.values()
             ]
         )
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .on_conflict_do_nothing(index_elements=["tenant_id", "idempotency_key"])
         .returning(LedgerEntry.id, LedgerEntry.idempotency_key)
     )
     inserted: dict[str, int] = {
@@ -151,17 +167,27 @@ async def ingest_ledger_batch(
         table = LedgerEntry.__table__
         bump = (
             update(table)
-            .where(table.c.idempotency_key == bindparam("key"))
+            .where(
+                table.c.tenant_id == bindparam("tenant"),
+                table.c.idempotency_key == bindparam("key"),
+            )
             .values(duplicate_count=table.c.duplicate_count + bindparam("delta"))
         )
         await session.execute(
-            bump, [{"key": key, "delta": delta} for key, delta in increments.items()]
+            bump,
+            [
+                {"tenant": tenant.account_id, "key": key, "delta": delta}
+                for key, delta in increments.items()
+            ],
         )
         rows = (
             await session.execute(
                 select(
                     LedgerEntry.id, LedgerEntry.idempotency_key, LedgerEntry.duplicate_count
-                ).where(LedgerEntry.idempotency_key.in_(list(increments)))
+                ).where(
+                    LedgerEntry.tenant_id == tenant.account_id,
+                    LedgerEntry.idempotency_key.in_(list(increments)),
+                )
             )
         ).all()
         for row in rows:
@@ -193,6 +219,11 @@ async def _enqueue(
     This is the whole point of the outbox: the row and the intent to publish it commit
     together. There is no window in which a transaction exists in Postgres but its
     event was lost, which would show up later as a fabricated 'unmatched' exception.
+
+    The message carries no tenant. It does not need one: it is a pointer to a row, and
+    the worker reads the tenant off that row along with everything else it matches on.
+    Putting the tenant in the message as well would create a second copy that an
+    attacker -- or a bug -- could disagree with the first about.
     """
     if not outcomes:
         return

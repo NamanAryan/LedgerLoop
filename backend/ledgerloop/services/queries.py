@@ -1,6 +1,11 @@
 """Read-path queries: stats, the transaction feed, and the exception queue.
 
-Two rules hold throughout:
+Three rules hold throughout:
+
+* Every query is scoped to one tenant, and the tenant is a required argument rather
+  than a default. A default would make "forgot to scope this" a silently working
+  code path that returns every tenant's rows; a required parameter makes it a
+  TypeError at import-time review, and mypy catches it before that.
 
 * Pagination is keyset, never OFFSET. ``OFFSET 100000`` makes PostgreSQL walk and
   discard 100000 rows on every page, so the last page of a feed costs the most --
@@ -22,6 +27,7 @@ from sqlalchemy.orm import joinedload
 
 from ledgerloop.db.enums import MatchLayer, ReconStatus
 from ledgerloop.db.models import Exception_, ReconciliationResult
+from ledgerloop.services.tenancy import Tenant
 
 WindowName = Literal["1h", "24h", "7d"]
 
@@ -46,7 +52,7 @@ class StatsRow:
     open_exceptions: int
 
 
-async def fetch_stats(session: AsyncSession, window: WindowName) -> StatsRow:
+async def fetch_stats(session: AsyncSession, tenant: Tenant, window: WindowName) -> StatsRow:
     """One pass over the window for every count and percentile.
 
     ``count(*) FILTER (WHERE ...)`` rather than five separate queries: the rows are
@@ -84,14 +90,19 @@ async def fetch_stats(session: AsyncSession, window: WindowName) -> StatsRow:
         func.percentile_cont(0.5).within_group(latency.asc()).filter(active).label("p50"),
         func.percentile_cont(0.95).within_group(latency.asc()).filter(active).label("p95"),
         func.percentile_cont(0.99).within_group(latency.asc()).filter(active).label("p99"),
-    ).where(ReconciliationResult.resolved_at >= cutoff)
+    ).where(
+        ReconciliationResult.tenant_id == tenant.account_id,
+        ReconciliationResult.resolved_at >= cutoff,
+    )
 
     row = (await session.execute(stmt)).one()
 
     # The open queue is not window-scoped: a break opened last week is still open work.
     open_count = (
         await session.execute(
-            select(func.count()).select_from(Exception_).where(Exception_.closed_at.is_(None))
+            select(func.count())
+            .select_from(Exception_)
+            .where(Exception_.tenant_id == tenant.account_id, Exception_.closed_at.is_(None))
         )
     ).scalar_one()
 
@@ -120,15 +131,20 @@ def _apply_keyset(stmt: Select, column, cursor: int | None, limit: int) -> Selec
 
 async def fetch_results_page(
     session: AsyncSession,
+    tenant: Tenant,
     *,
     status: ReconStatus | None,
     limit: int,
     cursor: int | None,
 ) -> tuple[list[ReconciliationResult], int | None]:
-    stmt = select(ReconciliationResult)
+    # The tenant predicate leads every read index (see models.py), so this is an index
+    # descent into one account's slice rather than a filter over everyone's rows.
+    stmt = select(ReconciliationResult).where(
+        ReconciliationResult.tenant_id == tenant.account_id
+    )
     if status is not None:
-        # Hits ix_reconciliation_results_status_id, which already carries id DESC,
-        # so the ORDER BY is free.
+        # Hits ix_reconciliation_results_tenant_status_id, which already carries
+        # id DESC, so the ORDER BY is free.
         stmt = stmt.where(ReconciliationResult.status == status)
     stmt = _apply_keyset(stmt, ReconciliationResult.id, cursor, limit)
 
@@ -151,6 +167,7 @@ async def fetch_results_page(
 
 async def fetch_exceptions_page(
     session: AsyncSession,
+    tenant: Tenant,
     *,
     status: Literal["open", "closed"] | None,
     limit: int,
@@ -165,6 +182,7 @@ async def fetch_exceptions_page(
     stmt = select(Exception_, ReconciliationResult).join(
         ReconciliationResult, Exception_.reconciliation_result_id == ReconciliationResult.id
     )
+    stmt = stmt.where(Exception_.tenant_id == tenant.account_id)
     # The raw sides ride along with the same statement. An exception exists to be
     # judged by a human, and "result 41822 is in amount drift" is not something anyone
     # can judge -- they need the two amounts that disagree and the transaction id.
@@ -185,12 +203,14 @@ async def fetch_exceptions_page(
 
 
 async def fetch_exception(
-    session: AsyncSession, exception_id: int
+    session: AsyncSession, tenant: Tenant, exception_id: int
 ) -> tuple[Exception_, ReconciliationResult] | None:
+    """One exception, scoped. Another tenant's id resolves to None, and the route turns
+    that into a 404 -- not a 403, which would confirm the id exists."""
     stmt = (
         select(Exception_, ReconciliationResult)
         .join(ReconciliationResult, Exception_.reconciliation_result_id == ReconciliationResult.id)
-        .where(Exception_.id == exception_id)
+        .where(Exception_.tenant_id == tenant.account_id, Exception_.id == exception_id)
         .options(
             joinedload(ReconciliationResult.gateway_txn),
             joinedload(ReconciliationResult.ledger_entry),
@@ -201,7 +221,7 @@ async def fetch_exception(
 
 
 async def close_exception(
-    session: AsyncSession, exception_id: int, notes: str
+    session: AsyncSession, tenant: Tenant, exception_id: int, notes: str
 ) -> Exception_ | None:
     """Close an open exception. Returns None if it was already closed or absent.
 
@@ -214,7 +234,11 @@ async def close_exception(
     """
     stmt = (
         update(Exception_)
-        .where(Exception_.id == exception_id, Exception_.closed_at.is_(None))
+        .where(
+            Exception_.tenant_id == tenant.account_id,
+            Exception_.id == exception_id,
+            Exception_.closed_at.is_(None),
+        )
         .values(closed_at=func.now(), resolution_notes=notes)
         .returning(Exception_)
     )

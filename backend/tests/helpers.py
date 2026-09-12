@@ -45,18 +45,38 @@ def ledger_payload(
     }
 
 
+def demo_headers(session_id: str) -> dict[str, str]:
+    """Headers that put a request on one visitor's demo tenant."""
+    return {"X-Demo-Session": session_id}
+
+
+def key_headers(raw_key: str) -> dict[str, str]:
+    """Headers that put a request on a keyed account."""
+    return {"Authorization": f"Bearer {raw_key}"}
+
+
 async def post_gateway(
-    api: httpx.AsyncClient, payload: dict[str, Any], key: str | None = None
+    api: httpx.AsyncClient,
+    payload: dict[str, Any],
+    key: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
     return await api.post(
         "/v1/gateway/webhook",
         json=payload,
-        headers={"Idempotency-Key": key or f"gw-{payload['txn_id']}"},
+        headers={
+            "Idempotency-Key": key or f"gw-{payload['txn_id']}",
+            **(headers or {}),
+        },
     )
 
 
-async def post_ledger(api: httpx.AsyncClient, *entries: dict[str, Any]) -> httpx.Response:
-    return await api.post("/v1/ledger/sync", json={"entries": list(entries)})
+async def post_ledger(
+    api: httpx.AsyncClient, *entries: dict[str, Any], headers: dict[str, str] | None = None
+) -> httpx.Response:
+    return await api.post(
+        "/v1/ledger/sync", json={"entries": list(entries)}, headers=headers or {}
+    )
 
 
 async def ingest_pair(

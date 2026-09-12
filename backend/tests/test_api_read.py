@@ -414,7 +414,9 @@ async def test_resolved_exception_response_keeps_the_enrichment(api, sessions, s
     assert body["gateway_amount"] == "1000.00"
 
 
-async def test_one_sided_exception_reports_the_missing_side_as_null(api, sessions, settings, session):
+async def test_one_sided_exception_reports_the_missing_side_as_null(
+    api, sessions, settings, session
+):
     await post_gateway(api, gateway_payload("TXN-ONESIDE"))
     await _age_rows(session)
     await Sweeper(sessions, settings).sweep_once()

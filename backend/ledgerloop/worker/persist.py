@@ -22,8 +22,14 @@ from ledgerloop.db.enums import IngestSource, ReconStatus
 from ledgerloop.db.models import Exception_, GatewayTransaction, LedgerEntry, ReconciliationResult
 from ledgerloop.matching.core import Decision, MatchConfig, TxnFacts
 
-#: The two raw tables, keyed by the side they represent.
-_MODEL = {IngestSource.GATEWAY: GatewayTransaction, IngestSource.LEDGER: LedgerEntry}
+#: The two raw tables, keyed by the side they represent. Annotated as a union of the
+#: two concrete classes rather than inferred: inference widens it to their common base,
+#: and every ``model.txn_id`` below then type-checks as an attribute of ``Base`` that
+#: does not exist -- which hides a real typo behind a wall of expected errors.
+_MODEL: dict[IngestSource, type[GatewayTransaction] | type[LedgerEntry]] = {
+    IngestSource.GATEWAY: GatewayTransaction,
+    IngestSource.LEDGER: LedgerEntry,
+}
 
 
 def _other(side: IngestSource) -> IngestSource:
@@ -33,6 +39,7 @@ def _other(side: IngestSource) -> IngestSource:
 def _facts(row: GatewayTransaction | LedgerEntry, side: IngestSource) -> TxnFacts:
     return TxnFacts(
         side=side,
+        tenant_id=row.tenant_id,
         row_id=row.id,
         txn_id=row.txn_id,
         amount=row.amount,
@@ -63,8 +70,14 @@ async def find_counterparties(
 ) -> list[TxnFacts]:
     """Fetch the other side's plausible partners for this transaction.
 
-    Two predicates keep this cheap and correct:
+    Three predicates keep this cheap and correct:
 
+    * ``tenant_id = :a`` -- the candidate's own account and no other. This is the
+      boundary: without it, one merchant's gateway row could settle against a
+      different merchant's ledger row that happens to share a txn_id, which is not a
+      namespace collision but a wrong answer about money. ``classify_pair`` refuses
+      the same pairing independently, so the guarantee survives either one being
+      removed.
     * ``txn_id = :t AND occurred_at BETWEEN :lo AND :hi`` rides the composite index and
       bounds the scan to the drift window, so the query cost does not grow with history.
     * ``reconciled_at IS NULL`` excludes rows that already reached a terminal state, so
@@ -79,6 +92,7 @@ async def find_counterparties(
         (
             await session.execute(
                 select(model).where(
+                    model.tenant_id == candidate.tenant_id,
                     model.txn_id == candidate.txn_id,
                     model.occurred_at >= low,
                     model.occurred_at <= high,
@@ -110,6 +124,7 @@ async def apply_decision(
     session: AsyncSession,
     decision: Decision,
     *,
+    tenant_id: int,
     latency_ms: int | None,
     message_id: str | None,
 ) -> PersistResult:
@@ -123,6 +138,10 @@ async def apply_decision(
     insert_stmt = (
         pg_insert(ReconciliationResult)
         .values(
+            # Copied from the raw row(s) this decision covers, never from the request
+            # that triggered the match -- by the time the matcher runs there is no
+            # request, only rows, and the row is the authority on whose it is.
+            tenant_id=tenant_id,
             gateway_txn_id=decision.gateway_row_id,
             ledger_entry_id=decision.ledger_row_id,
             status=decision.status,
@@ -151,7 +170,7 @@ async def apply_decision(
         opened = (
             await session.execute(
                 pg_insert(Exception_)
-                .values(reconciliation_result_id=result_id)
+                .values(tenant_id=tenant_id, reconciliation_result_id=result_id)
                 .on_conflict_do_nothing(index_elements=["reconciliation_result_id"])
                 .returning(Exception_.id)
             )
@@ -187,6 +206,11 @@ async def find_stale_pending(
 
     Rides the partial index ``WHERE reconciled_at IS NULL`` ordered by received_at, so
     the sweeper reads the backlog and nothing else -- it never scans reconciled history.
+
+    Deliberately *not* tenant-scoped: the sweeper is a background process with no
+    request and no caller, and its job is every tenant's backlog in arrival order. Each
+    row carries its own ``tenant_id`` into ``TxnFacts``, so the per-row work that
+    follows stays inside one account without the scan having to walk tenants.
     """
     model = _MODEL[source]
     cutoff = datetime.now(UTC) - older_than

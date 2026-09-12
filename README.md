@@ -24,6 +24,11 @@ while you are still reading the landing page. The matcher runs *inside* the API
 process there (`LEDGERLOOP_EMBED_WORKER`), because Render has no free background
 worker; see [Deploy](#deploy) for what that costs.
 
+Opening it puts you in a **sandbox tenant of your own** — your uploads and generated
+runs are yours alone, and they are deleted 24 hours after you stop touching them. An
+account key switches the whole dashboard to a real account; see
+[The dashboard](#the-dashboard).
+
 ---
 
 ## The problem
@@ -117,12 +122,19 @@ which is why it can be tested exhaustively without a database.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/v1/gateway/webhook` | One gateway transaction. `202`, idempotent. |
+| `POST` | `/v1/gateway/webhook/{source_token}` | Signed delivery from Stripe/Razorpay/custom. |
+| `GET` | `/v1/gateway/sources` | The caller's configured endpoints and their last delivery. |
+| `POST` | `/v1/gateway/sources` | Register an endpoint. `403` for demo tenants. |
+| `POST` | `/v1/gateway/sources/{id}/test` | Deliver a synthetic signed event to that source. |
 | `POST` | `/v1/ledger/sync` | Up to 1000 ledger entries per request. |
 | `GET` | `/v1/stats?window=1h\|24h\|7d` | Counts, match rate, p50/p95/p99, throughput. |
 | `GET` | `/v1/transactions?status=&limit=&cursor=` | Cursor-paginated result feed. |
 | `GET` | `/v1/exceptions?status=open\|closed` | Exception queue. |
 | `POST` | `/v1/exceptions/{id}/resolve` | Close an exception with notes. |
 | `GET` | `/health` `/ready` `/metrics` | Liveness, readiness, Prometheus. |
+
+Every `/v1` route resolves a tenant first; `/health`, `/ready` and `/metrics` do not,
+because they are questions about the process rather than about anyone's data.
 
 Both write endpoints are idempotent via a unique constraint plus explicit
 `ON CONFLICT DO NOTHING`. A retry returns `202` with `duplicate: true` — never a `409`.
@@ -132,6 +144,147 @@ would make them retry the retry.
 Pagination is keyset, never `OFFSET`. `OFFSET 100000` makes Postgres walk and discard
 100,000 rows, so the last page of a busy queue costs the most — precisely when someone is
 scrolling it.
+
+## Tenancy
+
+Every scoped table carries a `tenant_id`, and a request is resolved to exactly one
+account before any handler runs:
+
+| Request carries | Resolves to |
+|---|---|
+| `Authorization: Bearer llk_…`, valid | that account |
+| `Authorization`, invalid or revoked | **401** — never a fallback |
+| `X-Demo-Session: <uuid>` | that visitor's demo tenant, created on first sight |
+| neither header | the shared `default` demo tenant |
+
+The last row is what keeps the demo path open: `scripts/generate_load` and
+`scripts/benchmark` send no headers, so they land on one shared tenant together and
+the ground-truth comparison still sees exactly the rows they posted. No arguments
+changed.
+
+**The demo path is isolation, not a security boundary.** `X-Demo-Session` is a UUID
+the browser generates; it separates one visitor's synthetic data from another's and
+nothing more. Nothing real should go through it. Idle demo tenants and all their rows
+are deleted after 24 hours by the sweeper.
+
+**A bad key is a 401, never a quiet demotion to the demo tenant.** Serving a broken
+integration the shared demo data instead would hand it a dashboard that looks like it
+is working. An error gets investigated; a plausible screen does not.
+
+**`tenant_id` leads every uniqueness constraint, and that ordering is the whole point.**
+Idempotency keys are chosen by the client, so two tenants will eventually pick the same
+string. Under the original global `UNIQUE (idempotency_key)`, the second tenant's
+genuine payment answers `202 duplicate: true` and stores nothing — no error, no log
+line, money simply absent from reconciliation. `(idempotency_key, tenant_id)` would not
+fix it either; the *leading* column is the one the constraint partitions by. Migration
+`0002` drops and rebuilds both ingestion indexes and all four worker-idempotency
+partial indexes for exactly this reason.
+
+Matching refuses a cross-tenant pair twice over: the counterparty query filters on
+`tenant_id`, and `classify_pair` rejects the pair again on its own. Two guards because
+one of them is a `WHERE` clause a future refactor can drop without any test noticing.
+
+**Auth is a mode, not a per-endpoint decision — and that is forced.** The tempting
+design is to send a key only on webhook calls and leave the rest of the dashboard
+alone. It does not work: `/v1/stats`, `/v1/transactions` and `/v1/exceptions` would
+keep resolving to the demo tenant, so live gateway events would land in the real
+account while the feed underneath rendered sandbox data. You would connect Stripe
+successfully and never see a single transaction from it. So a key switches the whole
+dashboard. From the operator's side auth still *looks* per-feature, because webhooks
+are the only thing that asks for a key — it simply cannot be scoped that way.
+
+Unauthenticated writes are rate limited per IP (per account, far more loosely, for
+keyed callers), answering `429` with `Retry-After`. The limiter lives in Redis so it
+holds across replicas, and it **fails open** — the same judgement the outbox makes,
+because a Redis blip should degrade the system rather than stop ingestion.
+
+Keys are issued from the command line, not over HTTP:
+
+```bash
+docker compose exec api python -m scripts.create_api_key --account acme --label "prod"
+```
+
+Only a SHA-256 of the key is stored. SHA-256 rather than bcrypt because these are 32
+bytes of CSPRNG output, not human passwords — there is no dictionary to run against 256
+bits of entropy, so a slow KDF would add latency to every authenticated request and buy
+nothing.
+
+## Provider webhooks
+
+A real gateway posts to `/v1/gateway/webhook/{source_token}`. The token is in the URL
+and says *who is posting*; the signature proves it. Splitting them matters — the token
+shows up in access logs, proxy traces and browser history, and on its own it authorises
+nothing.
+
+| Provider | Header | Signed payload |
+|---|---|---|
+| Stripe | `Stripe-Signature` | `{timestamp}.{raw body}`, rejected outside ±5 min |
+| Razorpay | `X-Razorpay-Signature` | raw body |
+| custom | `X-LedgerLoop-Signature` | raw body |
+
+**Verification is against the raw request bytes.** The handler reads
+`await request.body()` and parses manually — it never binds a Pydantic model and
+re-serialises. Re-serialising changes key order, whitespace and unicode escaping, all
+invisible in the parsed object and all of which change the digest. The failure then
+looks exactly like a wrong secret, which sends you to rotate one that was always fine.
+There is a test that posts semantically identical JSON with different bytes and asserts
+it fails, so a refactor in that direction is caught here rather than in production.
+
+Comparisons are constant-time. Stripe's multiple `v1=` entries are all accepted, because
+that is what a secret rotation looks like and reading only the first breaks every one.
+
+**Amounts arrive as integer minor units.** Stripe's `105000` is ₹1,050.00, not ₹105,000.
+The conversion is `Decimal(minor).scaleb(-exponent)` — never `/ 100.0`, which would
+reintroduce the exact binary rounding error this project exists to detect, silently, on
+a value later compared to two decimal places. Zero-decimal currencies (JPY, KRW, …) are
+not divided; three-decimal ones (KWD, BHD, …) are **refused with a 422** rather than
+rounded to fit `numeric(18,2)`.
+
+`ledgerloop/matching/` is untouched by any of this. Adapters map a provider payload to
+the internal shape and the five layers stay ignorant of who sent the row, which is what
+keeps adding a provider from being a change to reconciliation logic.
+
+Retries stay `202` with `duplicate: true`, never `409` — the idempotency key is derived
+from the provider's own event id, so a redelivery collapses against the ingestion index.
+
+`last_event_at` and `last_delivery_status` are stamped on **every** delivery including
+rejected ones, in their own transaction so a 401 does not roll the record back. That is
+the point of the column: an endpoint receiving nothing and an endpoint rejecting
+everything both leave the transaction tables empty, and only this tells them apart.
+
+Register one from the dashboard (Reconcile → Live Webhook Stream → **Create endpoint**),
+or from the command line:
+
+```bash
+docker compose exec api python -m scripts.create_webhook_source   --account acme --provider stripe --signing-secret whsec_... --label "stripe prod"
+```
+
+The two are not interchangeable, and the difference is the secret. A dashboard-created
+source gets a **server-generated** secret, which is everything a `custom` source needs
+and is what `POST /v1/gateway/sources/{id}/test` signs with. It is *not* enough for a
+real Stripe or Razorpay integration: those issue their own secret and verification uses
+their bytes or fails, so a live provider source has to be registered with the CLI,
+passing the secret from the provider's dashboard. There is deliberately no secret field
+in the UI — one would imply the operator can choose it, and for Stripe they cannot.
+
+`POST /v1/gateway/sources/{id}/test` signs a synthetic event server-side and runs it
+through the real verify → adapt → ingest path, rather than skipping verification: a test
+that passes should prove the signing path works, not prove it can be bypassed. What it
+does not cover is the hop from the provider — DNS, TLS, the proxy, a cold start — so it
+answers "is this source wired up correctly", not "can Stripe reach me".
+
+`--signing-secret` must be the value the provider issued — the HMAC is computed with
+their bytes. The command refuses to generate one for Stripe or Razorpay, because that
+would create an endpoint that 401s forever. `signing_secret` is stored in the clear,
+unavoidably: verifying an HMAC needs the secret itself, so there is no digest-only
+version. It is never logged and never returned by any endpoint.
+
+> **Free tier will not work for this.** Stripe times out a delivery at ~30s and the
+> free-tier cold start is roughly a minute, so the first delivery after an idle period
+> fails outright. Retries land and idempotency handles them correctly, but Stripe
+> disables endpoints that keep failing. A real gateway needs a paid instance with the
+> matcher as its own process — the topology already in `fly.worker.toml`. The demo path
+> is unaffected and can stay on free tier.
 
 ## Local setup
 
@@ -178,6 +331,23 @@ and consumer-group semantics either do not exist or behave differently in a subs
 a green suite against a fake would prove nothing about what actually ships. Schema comes
 from `alembic upgrade head`, so the tests exercise the same migration chain production
 runs.
+
+### Frontend development
+
+React 19 + TypeScript + Vite. The backend has to be running.
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local     # point VITE_API_BASE_URL at your backend
+npm run dev                    # http://localhost:5173
+npm run check                  # tsc --noEmit
+npm run build                  # typecheck, then vite build -> dist/
+```
+
+`public/samples/` holds a matched CSV pair whose two files deliberately disagree on
+every header name — that is the situation the column-mapping screen exists for.
+Regenerate with `npm run samples`.
 
 ## Deploy
 
@@ -283,6 +453,10 @@ backend/tests/
 ├── test_api_read.py             stats, keyset pagination, feed enrichment, CORS
 ├── test_worker_concurrency.py   two workers, one stream, no double-processing
 ├── test_sweeper.py              the unmatched window
+├── test_tenancy.py              cross-tenant collision, read isolation, keys, retention
+├── test_webhook_signatures.py   per-provider signatures, replay window, rotation
+├── test_webhook_adapters.py     payload mapping, exact minor-unit conversion
+├── test_api_webhooks.py         signed delivery end to end, rejection, delivery status
 └── test_e2e.py                  real server, real worker, end to end
 ```
 
@@ -308,12 +482,159 @@ backend/
 
 frontend/
   src/
-    api/            HTTP client, ingestion pacing, generated API types
-    screens/        landing, upload/mapping, reconcile, dashboard
-    components/     table, layer cascade, exception detail
-    lib/            CSV parsing, money handling, synthetic data generator
+    api/
+      types.ts        the wire contract, transcribed from schemas.py
+      client.ts       fetch layer — retries 5xx never 4xx; duplicate:true is success
+      session.ts      which tenant this tab is; the only place headers are decided
+      ingest.ts       batching, the bounded pool, progress
+    tenant/           session.ts mirrored into React, for rendering the mode
+    hooks/            webhook source polling, health derivation, create + test
+    lib/
+      money.ts        minor units in, decimal strings out, display
+      csv.ts          PapaParse + column mapping + coercion, counting every refusal
+      generate.ts     synthetic streams + independently derived ground truth
+    components/       table, cascade, exception pane, webhook card, modals, primitives
+    screens/          landing, source choice, upload/mapping, reconcile, dashboard
+  public/samples/     a deliberately mismatched CSV pair
 ```
 
 The dashboard is a pure client: it posts both sides through the API and renders what
 the API returns. There is no matching engine in the browser — the five layers exist
 once, in `backend/ledgerloop/matching/`.
+
+## The dashboard
+
+React 19 + TypeScript + Vite, and **it computes nothing about matching**. Both data
+paths push rows into the API and every number on screen is read back from it. The five
+layers exist once, in `backend/ledgerloop/matching/core.py`.
+
+### Three ways in
+
+**Upload.** Two CSVs, parsed with PapaParse, with a column-mapping step because two
+exports never agree on header names. Ledger rows go to `POST /v1/ledger/sync` in batches
+of 1000 — the endpoint's own cap. Gateway rows go to `POST /v1/gateway/webhook`, one per
+request, because a webhook is one transaction by definition; they run through a bounded
+pool of 12 with a progress bar rather than thousands of unbounded `fetch` calls.
+
+**Synthetic.** The generator builds gateway/ledger pairs applying the drop, duplicate,
+drift and skew rates you set, then posts them to those same two endpoints. It is the
+upload path with a different source of rows. Sandbox only — see below.
+
+**Live webhook.** A real gateway posts signed events to
+`POST /v1/gateway/webhook/{source_token}` and they reconcile as they arrive. Needs an
+account key; the dashboard only creates and monitors the endpoint, and every signature
+is verified server-side.
+
+### Sandbox and account mode
+
+Two modes, derived from whether a key is stored rather than tracked beside it — two
+fields that must agree eventually disagree.
+
+| | Sandbox | Account |
+|---|---|---|
+| Sent | `X-Demo-Session: <uuid>` | `Authorization: Bearer <key>` |
+| Tenant | ephemeral, swept after 24h idle | the key's account |
+| Test data generator | available | **hard-disabled** |
+| Live webhook endpoint | locked | available |
+
+Never both headers. The backend prefers the key and ignores the demo header when one is
+present, so sending both changes nothing about the response — which is exactly why it
+must not be done: a mistake would sit invisible behind a backend that quietly does the
+right thing anyway.
+
+**The key switches the whole dashboard, not just the webhook calls.** Scoping auth to
+the one feature that needs it is the obvious design and it is broken: `/v1/stats`,
+`/v1/transactions` and `/v1/exceptions` would keep resolving to the demo tenant, so live
+gateway events would land in the real account while the feed underneath rendered sandbox
+data. You would connect Stripe successfully and never see a transaction from it. From
+the operator's side auth still *looks* per-feature, since webhooks are the only thing
+that asks for a key — it simply cannot be implemented that way.
+
+**The generator is disabled in account mode rather than warned about.** It writes
+synthetic transactions straight into reconciliation stats and there is no delete
+endpoint, so they are permanent. An undoable mistake behind a confirm dialog is still
+an undoable mistake. It is blocked on the `/reconcile/test` route itself, not only on
+the card, because that route has a URL and a bookmark reaches it directly.
+
+**A 401 while a key is stored clears the key.** The backend deliberately does not fall
+back to the demo tenant on a bad key, so a revoked key would otherwise break every
+screen at once with no way out but a hard reload. The fetch wrapper drops it centrally,
+the app returns to sandbox, and a dismissible banner says why.
+
+The key lives in `sessionStorage` and dies with the tab; only its first 12 characters
+are ever displayed again. A bearer token in web storage is readable by any XSS on the
+page — acceptable for a demo dashboard holding synthetic data, not for a production
+console, where the answer is a short-lived `httpOnly` cookie session that JavaScript
+cannot read at all.
+
+Keys are entered at runtime through the header, never built in. Issue one with
+`python -m scripts.create_api_key --account <name>`.
+
+### The webhook card
+
+Five states, and the last two are the reason it is worth the code:
+
+| State | Reads |
+|---|---|
+| locked | sandbox — no live endpoint offered, because a demo tenant's URL would 404 after 24h |
+| awaiting | endpoint created, nothing has arrived |
+| live | green, with a relative time ticking every second |
+| idle | grey after 15 minutes of silence — a dead integration must not read as green |
+| **rejecting** | red, naming the cause |
+
+`rejecting` is the common real failure — a signing secret that does not match, so every
+delivery 401s. It leaves the transaction tables exactly as empty as having received
+nothing at all, which is why the two must look different. And because a *rejected*
+delivery still updates `last_event_at`, a card keyed on recency alone would paint that
+failure green; health checks the delivery status first.
+
+Polling is 10s, account mode only, paused on `document.hidden` and refetched on
+return. A backgrounded tab polling for hours is how a demo keeps a free-tier instance
+awake and burns its quota.
+
+**Send Test Payload is server-side.** The dashboard holds no signing secret and could
+only ever produce a 401, so `POST /v1/gateway/sources/{id}/test` signs a synthetic event
+with the source's own secret and runs the real verify → adapt → ingest path. It reports
+`duplicate: true` plainly rather than as a failure — a repeat event id collapsing is the
+idempotency layer working, and calling it an error teaches distrust of the guarantee.
+
+### Design notes
+
+**Ingestion is not reconciliation, and the UI never conflates them.** The endpoints
+answer `202`: the row is durable and queued, not matched. So the progress overlay ends
+when the last row is *accepted*, and the dashboard then shows the counts converging as
+the backend works. Unmatched is high immediately after an upload and falls as
+counterparties arrive — correct behaviour, and the banner says so rather than letting it
+read as a broken engine.
+
+**Ground truth is computed independently.** The generator records what it injected from
+the layer rules directly, never by asking the engine, so the *injected vs detected* panel
+is a real comparison rather than the engine agreeing with itself.
+
+**Money is never a float.** Amounts are parsed from CSV into integer minor units and
+serialised to the decimal strings the API takes. `parseMinor` is string-based because
+`Math.round(parseFloat(s) * 100)` is silently wrong for inputs like `8.115`. A JSON
+number would be parsed to a float server-side, reintroducing the error `numeric(18,2)`
+exists to prevent.
+
+**Rejected rows are counted, never dropped.** A tool that silently discards eleven
+malformed CSV rows has manufactured eleven breaks. Every refusal is surfaced with a
+reason and a line number, and the checks mirror the API's own request models — so a row
+that survives parsing is one the backend will not 422 mid-upload. Ambiguous dates like
+`03/04/2026` are rejected rather than guessed.
+
+**Idempotency keys are derived from row content**, not from a batch nonce, when the file
+carries no key column. Re-uploading the same file is then recognised as a repeat rather
+than counted twice. The synthetic generator prefixes its run id instead, because two runs
+are genuinely different transactions that happen to look alike.
+
+**Pagination is the server's.** The feed uses the opaque cursor from
+`GET /v1/transactions` and appends. The cursor is never parsed or incremented here — the
+moment a client does arithmetic on a cursor, the server can no longer change what one
+means.
+
+**`api/session.ts` is a module, not React state.** `client.ts` and `ingest.ts` are plain
+async functions called from callbacks and intervals, not from render, so threading a
+context value through them would mean either passing a token down every signature or
+calling hooks where hooks cannot go. The module holds the answer, `TenantContext`
+mirrors it for display, and every request reads it from one place.

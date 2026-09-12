@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Path, Query, status
 
-from ledgerloop.api.deps import SessionDep, SettingsDep
+from ledgerloop.api.deps import SessionDep, SettingsDep, TenantDep
 from ledgerloop.api.schemas import (
     ExceptionOut,
     ExceptionPage,
@@ -53,9 +53,10 @@ def _parse_cursor(cursor: str | None) -> int | None:
 async def get_stats(
     session: SessionDep,
     settings: SettingsDep,
+    tenant: TenantDep,
     window: Annotated[Literal["1h", "24h", "7d"], Query()] = "1h",
 ) -> StatsOut:
-    row = await fetch_stats(session, window)
+    row = await fetch_stats(session, tenant, window)
     seconds = WINDOW_SECONDS[window]
 
     # Duplicates are excluded from the denominator. They are not reconciliation
@@ -88,12 +89,13 @@ async def get_stats(
 )
 async def list_transactions(
     session: SessionDep,
+    tenant: TenantDep,
     status_filter: Annotated[ReconStatus | None, Query(alias="status")] = None,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
 ) -> TransactionPage:
     rows, next_cursor = await fetch_results_page(
-        session, status=status_filter, limit=limit, cursor=_parse_cursor(cursor)
+        session, tenant, status=status_filter, limit=limit, cursor=_parse_cursor(cursor)
     )
     return TransactionPage(
         items=[_result_out(row) for row in rows],
@@ -158,12 +160,13 @@ def _exception_out(exc, result) -> ExceptionOut:  # type: ignore[no-untyped-def]
 @router.get("/exceptions", response_model=ExceptionPage, summary="Exception queue")
 async def list_exceptions(
     session: SessionDep,
+    tenant: TenantDep,
     status_filter: Annotated[Literal["open", "closed"] | None, Query(alias="status")] = None,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
 ) -> ExceptionPage:
     rows, next_cursor = await fetch_exceptions_page(
-        session, status=status_filter, limit=limit, cursor=_parse_cursor(cursor)
+        session, tenant, status=status_filter, limit=limit, cursor=_parse_cursor(cursor)
     )
     return ExceptionPage(
         items=[_exception_out(exc, result) for exc, result in rows],
@@ -178,6 +181,7 @@ async def list_exceptions(
 )
 async def resolve_exception(
     session: SessionDep,
+    tenant: TenantDep,
     payload: ExceptionResolveIn,
     exception_id: Annotated[int, Path(ge=1)],
 ) -> ExceptionOut:
@@ -185,10 +189,13 @@ async def resolve_exception(
     # close_exception() is a compare-and-set on one row, and the row lock it takes is
     # what serialises two operators resolving the same break.
     async with session.begin():
-        closed = await close_exception(session, exception_id, payload.resolution_notes)
+        closed = await close_exception(session, tenant, exception_id, payload.resolution_notes)
         if closed is None:
-            existing = await fetch_exception(session, exception_id)
+            existing = await fetch_exception(session, tenant, exception_id)
             if existing is None:
+                # Also the answer for another tenant's exception id. 404 rather than
+                # 403 on purpose: 403 would confirm the id exists, which is a fact
+                # about somebody else's data.
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
             # Already closed. 409, not 200: the caller's notes were not applied, and
             # telling them otherwise would lose a human's actual resolution.
@@ -196,6 +203,6 @@ async def resolve_exception(
                 status_code=status.HTTP_409_CONFLICT, detail="exception already closed"
             )
 
-    found = await fetch_exception(session, exception_id)
+    found = await fetch_exception(session, tenant, exception_id)
     assert found is not None  # just closed it inside this request
     return _exception_out(*found)

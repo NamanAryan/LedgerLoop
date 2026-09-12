@@ -11,6 +11,7 @@ containers, and no async.
 
 Layer order, each running only on what the previous did not resolve:
 
+  0. tenancy      both rows belong to the same account, or nothing matches at all
   1. exact        same txn_id, same currency, same amount, |dt| <= 2s
   2. time drift   same txn_id, same currency, same amount, |dt| <= 60s
   3. amount drift same txn_id, same currency, |dt| <= 60s,
@@ -50,6 +51,11 @@ class TxnFacts:
     """
 
     side: IngestSource
+    #: Owning account. Carried here so the pure layer can refuse a cross-tenant pair
+    #: on its own, rather than trusting that every caller remembered to filter. The
+    #: query in ``worker.persist.find_counterparties`` filters too; this is the second
+    #: of the two, and the one that survives a future caller written from scratch.
+    tenant_id: int
     row_id: int
     txn_id: str
     amount: Decimal
@@ -140,6 +146,13 @@ def classify_pair(
     Returns None when this pair is not matchable at all -- different txn_id,
     different currency, opposite sides missing, or drift beyond every window.
     """
+    if candidate.tenant_id != other.tenant_id:
+        # Two tenants sharing a txn_id is expected, not exotic: the id comes from
+        # whatever gateway each of them uses, and there is no global namespace. Pairing
+        # across the boundary would settle one merchant's payment against another
+        # merchant's ledger -- a wrong answer that also leaks the existence of the
+        # other tenant's transaction into the first one's reconciliation feed.
+        return None
     if candidate.side is other.side:
         return None  # a row never reconciles against its own side
     if candidate.txn_id != other.txn_id:

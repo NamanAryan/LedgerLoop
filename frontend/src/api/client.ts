@@ -16,8 +16,20 @@
  * **Only 5xx and network errors are retried.** A 4xx means the request was wrong and
  * resending it unchanged will be wrong again; a 422 in particular is a validation
  * failure that needs a human to fix the mapping, not a backoff.
+ *
+ * **Every request carries the current tenant.** The backend is multi-tenant and this
+ * client has two modes, held in `api/session.ts`: sandbox sends `X-Demo-Session`,
+ * account sends `Authorization: Bearer`. Never both. Which one applies is decided in
+ * one place — here — so a screen added later cannot forget it and silently read or
+ * write into the wrong tenant.
+ *
+ * **A 401 while a key is stored means the key is stale.** Phase 1 deliberately does
+ * *not* fall back to the demo tenant on a bad key, so without handling this centrally
+ * a revoked key would make every screen in the dashboard fail at once with no way out.
+ * `request()` clears the key and notifies, dropping the app to sandbox mode.
  */
 
+import { clearApiKey, getApiKey, tenantHeaders } from './session'
 import type {
   ExceptionPage,
   GatewayWebhookAccepted,
@@ -29,6 +41,10 @@ import type {
   StatsOut,
   StatsWindow,
   TransactionPage,
+  WebhookSource,
+  WebhookSourceCreate,
+  WebhookSourceList,
+  WebhookTestResult,
 } from './types'
 
 /**
@@ -83,10 +99,25 @@ interface RequestOptions {
   signal?: AbortSignal
   /** Attempts for 5xx and network failures. 1 means no retry. */
   attempts?: number
+  /**
+   * Leave a stored key alone on a 401.
+   *
+   * Only the key-entry modal sets this: it is *testing* a candidate key, so a 401 is
+   * the expected answer to a typo and must not sign the operator out of the session
+   * they already have.
+   */
+  skipAuthReset?: boolean
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, headers = {}, signal, attempts = 3 } = options
+  const {
+    method = 'GET',
+    body,
+    headers = {},
+    signal,
+    attempts = 3,
+    skipAuthReset = false,
+  } = options
   let lastError: unknown
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -96,6 +127,9 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
         signal,
         headers: {
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          // Applied here rather than at each call site, so a screen added later cannot
+          // forget it and silently read or write into the wrong tenant.
+          ...tenantHeaders(),
           ...headers,
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -104,6 +138,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       if (!response.ok) {
         const raw: unknown = await response.json().catch(() => null)
         const error = new ApiError(response.status, describe(response.status, raw), path)
+        // A 401 with a key stored means that key is stale or revoked. The backend
+        // never falls back to the demo tenant on a bad key, so leaving it in place
+        // would break every screen at once with nothing on offer but a hard reload.
+        // Clearing it here drops the whole app to sandbox in one step.
+        //
+        // `skipAuthReset` exempts the validation call in the key-entry modal, where a
+        // 401 is the expected answer to a typo and must not disturb a working session.
+        if (response.status === 401 && !skipAuthReset && getApiKey() !== null) {
+          clearApiKey()
+        }
         // A 4xx will fail identically on the next attempt. Surface it now.
         if (error.isClientError) throw error
         lastError = error
@@ -228,4 +272,67 @@ export function getHealth(signal?: AbortSignal): Promise<{ status: string; servi
 /** Readiness: reports Postgres and Redis individually. 503 when either is down. */
 export function getReady(signal?: AbortSignal): Promise<ReadyOut> {
   return request<ReadyOut>('/ready', { signal, attempts: 1 })
+}
+
+// --------------------------------------------------------------------------- //
+// Webhook sources                                                               //
+// --------------------------------------------------------------------------- //
+
+/**
+ * The caller's configured endpoints.
+ *
+ * Doubles as the key-validation call: it is the cheapest authenticated `GET` on the
+ * API, so the key-entry modal uses it to tell a good key from a bad one before storing
+ * anything. `skipAuthReset` is set there so a rejected candidate does not sign out the
+ * session that is already working.
+ */
+export function getWebhookSources(options: {
+  signal?: AbortSignal
+  key?: string
+  skipAuthReset?: boolean
+} = {}): Promise<WebhookSourceList> {
+  const { signal, key, skipAuthReset = false } = options
+  return request<WebhookSourceList>('/v1/gateway/sources', {
+    signal,
+    // A candidate key overrides the stored one for this call only — validating a key
+    // must not require storing it first.
+    headers: key === undefined ? {} : { Authorization: `Bearer ${key}` },
+    skipAuthReset,
+    // One attempt when validating: a retry would just repeat a 401 and make the modal
+    // feel broken rather than decisive.
+    attempts: key === undefined ? 3 : 1,
+  })
+}
+
+/** Register an endpoint. 403 for demo tenants — see the backend route for why. */
+export function createWebhookSource(payload: WebhookSourceCreate): Promise<WebhookSource> {
+  return request<WebhookSource>('/v1/gateway/sources', {
+    method: 'POST',
+    body: payload,
+    // Not retried. A 5xx here might still have created the source, and a blind retry
+    // would leave the account with two endpoints and no way to tell which is which.
+    attempts: 1,
+  })
+}
+
+/**
+ * Ask the server to sign a synthetic event with this source's secret and run it through
+ * the real verify → adapt → ingest path.
+ *
+ * Server-side because the secret never leaves the backend; the dashboard holds none and
+ * could only ever produce a 401. What it does not cover is the network hop from the
+ * provider — DNS, TLS, the proxy, a cold start — so a pass means "this source is wired
+ * up correctly", not "Stripe can reach you".
+ */
+export function sendTestPayload(sourceId: number): Promise<WebhookTestResult> {
+  return request<WebhookTestResult>(`/v1/gateway/sources/${sourceId}/test`, {
+    method: 'POST',
+    attempts: 1,
+  })
+}
+
+/** The URL a provider posts to. Built from the same base as every other call, so a
+ *  misconfigured `VITE_API_BASE_URL` is wrong in one obvious place rather than two. */
+export function webhookUrl(sourceToken: string): string {
+  return `${API_BASE}/v1/gateway/webhook/${sourceToken}`
 }

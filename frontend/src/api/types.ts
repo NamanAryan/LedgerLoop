@@ -189,3 +189,59 @@ export interface ReadyOut {
   database: DependencyStatus
   redis: DependencyStatus
 }
+
+// --------------------------------------------------------------------------- //
+// Webhook sources                                                               //
+// --------------------------------------------------------------------------- //
+
+/** Mirrors `WebhookProvider` in db/enums.py. The provider selects both the signature
+ *  scheme and the payload adapter, server-side. */
+export type WebhookProvider = 'stripe' | 'razorpay' | 'custom'
+
+/** Mirrors `WebhookDeliveryStatus`. `null` on a source that has never received one. */
+export type WebhookDeliveryStatus = 'ok' | 'invalid_signature' | 'invalid_payload'
+
+/**
+ * `GET /v1/gateway/sources` item.
+ *
+ * There is no `signing_secret` here and there must never be one. The backend cannot
+ * hash it — HMAC verification needs the bytes themselves — so the entirety of its
+ * protection is that it never leaves the database.
+ *
+ * `source_token` *is* returned: it sits in the URL the provider posts to, so it is not
+ * a secret, and an operator needs it to configure the far end.
+ */
+export interface WebhookSource {
+  id: number
+  provider: WebhookProvider
+  source_token: string
+  label: string
+  /** ISO-8601, or null if nothing has ever arrived. Stamped on rejected deliveries too
+   *  — "receiving nothing" and "rejecting everything" both leave the transaction
+   *  tables empty, and this is the only thing that tells them apart. */
+  last_event_at: string | null
+  last_delivery_status: WebhookDeliveryStatus | null
+  created_at: string
+  revoked_at: string | null
+}
+
+export interface WebhookSourceList {
+  items: WebhookSource[]
+}
+
+/** `POST /v1/gateway/sources`. No secret field: the server generates it. */
+export interface WebhookSourceCreate {
+  provider: WebhookProvider
+  label?: string
+}
+
+/** `POST /v1/gateway/sources/{id}/test`. */
+export interface WebhookTestResult {
+  delivered: boolean
+  http_status: number
+  /** True when a redelivery collapsed against the ingestion index. Success, not
+   *  failure — reporting it as an error would teach distrust of idempotency. */
+  duplicate: boolean
+  txn_id: string | null
+  detail: string | null
+}

@@ -37,6 +37,13 @@ TABLES = (
     "outbox_events",
     "gateway_transactions",
     "ledger_entries",
+    # Tenancy. Truncated like everything else, so each test starts with no accounts at
+    # all -- including the shared default one, which the resolver recreates on the
+    # first request. A test that inherited a previous test's demo accounts could pass
+    # while the isolation it claims to check was broken.
+    "api_keys",
+    "webhook_sources",
+    "accounts",
 )
 
 
@@ -104,6 +111,15 @@ def settings(migrated: Infra) -> Settings:
         claim_min_idle_ms=200,
         log_json=False,
         log_level="WARNING",
+        # Retention keeps its production defaults here on purpose. The sweeper's
+        # unmatched pass calls into it, and a 0-hour window would have every other
+        # sweeper test delete the default demo account -- and every row under it --
+        # halfway through its own assertions. The retention tests build their own
+        # Settings with a zero window and call sweep_demo_accounts() directly.
+        #
+        # last_seen_at, by contrast, is refreshed on every request so the touch path
+        # is actually exercised rather than skipped by its staleness check.
+        last_seen_refresh_s=0,
     )
 
 

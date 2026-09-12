@@ -19,10 +19,15 @@ T0 = datetime(2026, 3, 14, 9, 30, 0, tzinfo=UTC)
 
 DEFAULT_CONFIG = MatchConfig.from_settings(Settings())
 
+#: The tenant both builders default to. Named rather than inlined so a cross-tenant
+#: test reads as "same everything except this", which is the whole point of the case.
+DEFAULT_TENANT = 1
+
 
 def gateway(
     *,
     row_id: int = 1,
+    tenant_id: int = DEFAULT_TENANT,
     txn_id: str = "TXN-1",
     amount: str = "1000.00",
     currency: str = "INR",
@@ -31,6 +36,7 @@ def gateway(
 ) -> TxnFacts:
     return TxnFacts(
         side=IngestSource.GATEWAY,
+        tenant_id=tenant_id,
         row_id=row_id,
         txn_id=txn_id,
         amount=Decimal(amount),
@@ -43,6 +49,7 @@ def gateway(
 def ledger(
     *,
     row_id: int = 2,
+    tenant_id: int = DEFAULT_TENANT,
     txn_id: str = "TXN-1",
     amount: str = "1000.00",
     currency: str = "INR",
@@ -51,6 +58,7 @@ def ledger(
 ) -> TxnFacts:
     return TxnFacts(
         side=IngestSource.LEDGER,
+        tenant_id=tenant_id,
         row_id=row_id,
         txn_id=txn_id,
         amount=Decimal(amount),

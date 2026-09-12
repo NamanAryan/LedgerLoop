@@ -123,7 +123,15 @@ class MatcherWorker:
                 else:
                     latency_ms = compute_latency_ms(decision, sides, datetime.now(UTC))
                     persisted = await apply_decision(
-                        session, decision, latency_ms=latency_ms, message_id=message_id
+                        session,
+                        decision,
+                        # The candidate row is the authority on whose transaction this
+                        # is, and the counterparty is guaranteed to agree: both the
+                        # counterparty query and classify_pair refuse a cross-tenant
+                        # pair, so a decision spanning two tenants cannot be produced.
+                        tenant_id=candidate.tenant_id,
+                        latency_ms=latency_ms,
+                        message_id=message_id,
                     )
                     outcome = ProcessOutcome(
                         decision,

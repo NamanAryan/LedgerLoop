@@ -7,6 +7,7 @@
  */
 
 import { Link, useNavigate } from 'react-router-dom'
+import { useTenantContext } from '../tenant/TenantContext'
 import type { ColumnMap } from '../lib/csv'
 import type { GeneratorConfig } from '../lib/generate'
 import type { Side } from '../api/types'
@@ -56,6 +57,12 @@ export function Reconcile({
   onFallbackCurrency: (value: string) => void
   onRunUploaded: () => void
 }) {
+  const { mode: tenantMode } = useTenantContext()
+  // Hiding the card on /reconcile is not enough — this route has a URL, and a bookmark
+  // or a back button reaches it directly. The generator is blocked here, where the
+  // writing actually happens, rather than only where it is offered.
+  const generatorBlocked = mode === 'test' && tenantMode === 'account'
+
   const navigate = useNavigate()
   const go = (next: Mode) => {
     const target = MODES.find((option) => option.value === next)
@@ -79,7 +86,22 @@ export function Reconcile({
 
       {runError !== null && <Alert>{runError}</Alert>}
 
-      {mode === 'test' ? (
+      {generatorBlocked ? (
+        <div className="rounded-lg border border-line p-6 sm:p-10">
+          <h2 className="font-display text-xl font-normal tracking-tight text-cream">
+            Not available on an account
+          </h2>
+          <p className="mt-3 max-w-xl text-sm font-light leading-[1.8] text-ash">
+            The generator writes synthetic transactions straight into reconciliation stats, and
+            there is no delete endpoint — once they are in a real account&rsquo;s figures they
+            stay there. Sign out to run it against a sandbox tenant, or use{' '}
+            <Link to="/reconcile/upload" className="text-gold hover:opacity-75">
+              Upload
+            </Link>{' '}
+            to bring your own data.
+          </p>
+        </div>
+      ) : mode === 'test' ? (
         <TestDataPanel
           config={generator}
           onChange={onGeneratorChange}

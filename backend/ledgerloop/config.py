@@ -96,6 +96,35 @@ class Settings(BaseSettings):
     sweep_interval_s: int = 30
     unmatched_after_s: int = 300  # 5 min: how long a row waits for its counterparty
 
+    # --- Tenancy ----------------------------------------------------------
+    #: How long an idle demo tenant and all of its rows are kept. Demo data is
+    #: synthetic by definition -- the path is unauthenticated, so nothing real is
+    #: supposed to be on it -- and without retention every visitor who ever opened the
+    #: dashboard leaves rows behind forever.
+    demo_retention_hours: int = 24
+    #: How often retention runs. Far less often than ``sweep_interval_s``: the
+    #: unmatched sweep is answering a question about money and has to be prompt, while
+    #: retention is housekeeping with a 24-hour deadline. Running it on every sweep
+    #: pass would put an index scan of ``accounts`` between the matcher and its work
+    #: 120 times an hour to delete nothing.
+    demo_sweep_interval_s: int = 3_600
+    #: Only rewrite ``accounts.last_seen_at`` once it is this stale. Retention reads
+    #: that column, so it must stay current, but writing it on every request would put
+    #: an UPDATE of one hot row in front of every dashboard poll.
+    last_seen_refresh_s: int = 300
+
+    #: Writes per minute from one IP with no API key. 1,000/s, which is a deliberate
+    #: compromise: the benchmark harness offers up to 1,000 tx/s from a single host
+    #: over the same unauthenticated path, so a tighter default would silently turn
+    #: documented benchmark runs into a graph of 429s. It still bounds the open
+    #: endpoint -- an anonymous caller cannot stream into the database indefinitely --
+    #: and a public deployment that is not being benchmarked should lower it.
+    rate_limit_anon_writes_per_min: int = 60_000
+    #: Writes per minute for a keyed account. Present rather than unlimited so a
+    #: runaway retry loop in a customer's integration is capped somewhere, but set far
+    #: above any real webhook volume.
+    rate_limit_keyed_writes_per_min: int = 120_000
+
     # --- Ingestion limits -------------------------------------------------
     ledger_batch_max: int = 1_000
 

@@ -25,6 +25,18 @@ class IngestSource(StrEnum):
     LEDGER = "ledger"
 
 
+class AccountKind(StrEnum):
+    """What a tenant is, which decides whether its data is ever deleted.
+
+    ``demo`` accounts are created on demand for an unauthenticated visitor and are
+    swept wholesale once idle (see ``Sweeper.sweep_demo_accounts``). ``real`` accounts
+    are key-holding tenants and are never touched by retention.
+    """
+
+    REAL = "real"
+    DEMO = "demo"
+
+
 class ReconStatus(StrEnum):
     """Terminal classification of a reconciliation attempt."""
 
@@ -48,6 +60,35 @@ class MatchLayer(StrEnum):
     AMOUNT_DRIFT = "amount_drift"
     DUPLICATE = "duplicate"
     UNMATCHED_SWEEP = "unmatched_sweep"
+
+
+class WebhookProvider(StrEnum):
+    """Which gateway is posting, which decides how a delivery is authenticated.
+
+    The provider is not cosmetic metadata: it selects the signature scheme and the
+    payload adapter, so a source with the wrong provider fails verification rather
+    than silently mapping the wrong fields.
+    """
+
+    STRIPE = "stripe"
+    RAZORPAY = "razorpay"
+    #: LedgerLoop's own payload shape, signed with HMAC-SHA256 over the raw body.
+    #: For merchants posting from their own systems rather than through a gateway.
+    CUSTOM = "custom"
+
+
+class WebhookDeliveryStatus(StrEnum):
+    """Outcome of the most recent delivery to a source.
+
+    Kept as a status rather than a boolean because the three failure modes need
+    different responses from a human: a bad signature means the secret is wrong on one
+    side, an unmappable payload means the event type is not one we handle, and neither
+    is fixed the way the other is.
+    """
+
+    OK = "ok"
+    INVALID_SIGNATURE = "invalid_signature"
+    INVALID_PAYLOAD = "invalid_payload"
 
 
 #: Statuses that require a human to look at them -> an ``exceptions`` row is opened.

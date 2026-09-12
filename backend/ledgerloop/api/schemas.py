@@ -18,7 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
-from ledgerloop.db.enums import MatchLayer, ReconStatus
+from ledgerloop.db.enums import MatchLayer, ReconStatus, WebhookDeliveryStatus, WebhookProvider
 
 #: numeric(18,2), mirrored from the schema. More than two decimal places is a 422,
 #: not a silent round -- rounding someone's money without telling them is not okay.
@@ -107,6 +107,87 @@ class LedgerSyncAccepted(BaseModel):
     accepted: int = Field(description="Entries stored for the first time.")
     duplicates: int = Field(description="Entries whose idempotency key was already present.")
     results: list[IngestAck]
+
+
+# --------------------------------------------------------------------------- #
+# Webhook sources                                                               #
+# --------------------------------------------------------------------------- #
+
+
+class WebhookSourceOut(BaseModel):
+    """One configured provider endpoint.
+
+    Note what is absent: ``signing_secret``. It is the one value in the schema that
+    cannot be hashed -- HMAC verification needs the bytes themselves -- so the whole
+    of its protection is that it never leaves the database. Adding it to this model
+    would be enough to undo that, which is why it is called out here rather than
+    silently omitted.
+
+    ``source_token`` *is* returned. It appears in the URL the provider posts to, so it
+    is not a secret, and an operator needs it to configure the endpoint at the far end.
+    """
+
+    id: int
+    provider: WebhookProvider
+    source_token: str
+    label: str
+    #: When something last arrived, and what happened to it. Both nullable: a source
+    #: that has never received a delivery is a different state from one whose last
+    #: delivery failed, and a dashboard has to be able to say which.
+    last_event_at: datetime | None
+    last_delivery_status: WebhookDeliveryStatus | None
+    created_at: datetime
+    revoked_at: datetime | None
+
+    @property
+    def is_live(self) -> bool:
+        return self.revoked_at is None and self.last_delivery_status is WebhookDeliveryStatus.OK
+
+
+class WebhookSourceList(BaseModel):
+    """Not paginated. An account configures a handful of endpoints, not thousands, so
+    a cursor here would be ceremony with no page behind it."""
+
+    items: list[WebhookSourceOut]
+
+
+class WebhookSourceCreate(_Strict):
+    """Create an endpoint for the calling account.
+
+    No ``signing_secret`` field, deliberately. Accepting one here would say the caller
+    chooses the secret, and for Stripe and Razorpay they cannot -- the provider issues
+    it, and verification uses the provider's bytes or fails. So the server generates
+    one, and a source that must verify a real Stripe delivery has its secret set from
+    the CLI instead (``scripts/create_webhook_source.py``).
+    """
+
+    provider: WebhookProvider
+    label: Annotated[str, Field(min_length=1, max_length=255)] = "Dashboard endpoint"
+
+
+class WebhookTestResult(BaseModel):
+    """Outcome of a self-test delivery.
+
+    ``duplicate`` is surfaced rather than hidden because it is the *correct* answer to
+    a second test with the same event id, and a dashboard that reported it as a failure
+    would be teaching the operator to distrust the idempotency they depend on.
+    """
+
+    delivered: bool
+    http_status: int
+    duplicate: bool
+    txn_id: str | None = None
+    detail: str | None = None
+
+
+class WebhookAccepted(BaseModel):
+    """Answer to a provider delivery. Mirrors the unauthenticated endpoint's contract:
+    202 with ``duplicate`` on a redelivery, never a 409."""
+
+    accepted: Literal[True] = True
+    provider: WebhookProvider
+    event_type: str
+    result: IngestAck
 
 
 # --------------------------------------------------------------------------- #

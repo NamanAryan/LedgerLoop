@@ -30,6 +30,8 @@ import { ChooseSource } from './screens/ChooseSource'
 import { Reconcile, type Mode } from './screens/Reconcile'
 import type { UploadedFile } from './screens/UploadMapping'
 import { Dashboard } from './screens/Dashboard'
+import { ExpiredKeyBanner, KeyEntryModal, TenantBadge } from './components/KeyEntry'
+import { TenantProvider } from './tenant/TenantContext'
 import { formatCount } from './format'
 
 /** Files this large take long enough to read that the UI must say something. */
@@ -38,7 +40,11 @@ const LARGE_FILE_BYTES = 4 * 1024 * 1024
 export default function App() {
   return (
     <BrowserRouter>
-      <Shell />
+      {/* Outside the router: which tenant is active is not a property of the current
+          route, and every screen under it reads from the same one. */}
+      <TenantProvider>
+        <Shell />
+      </TenantProvider>
     </BrowserRouter>
   )
 }
@@ -67,6 +73,7 @@ function Shell() {
     })
   }, [])
 
+  const [keyEntryOpen, setKeyEntryOpen] = useState(false)
   const [generator, setGenerator] = useState<GeneratorConfig>(DEFAULT_GENERATOR_CONFIG)
   const [progress, setProgress] = useState<IngestProgress | null>(null)
   const [running, setRunning] = useState(false)
@@ -195,20 +202,29 @@ function Shell() {
   return (
     <div className="flex min-h-svh flex-col">
       <header className="border-b border-line">
-        <div className="mx-auto flex h-16 w-full max-w-[1600px] items-center px-6 sm:px-8 lg:px-12">
+        <div className="mx-auto flex h-16 w-full max-w-[1600px] items-center justify-between gap-6 px-6 sm:px-8 lg:px-12">
           <Link
             to="/"
             className="font-display text-xl tracking-tight text-cream transition-opacity duration-300 ease-refined hover:opacity-80"
           >
             Ledger<span className="italic text-gold">Loop</span>
           </Link>
+          {/* Persistent, not on hover: sandbox and account render identical charts over
+              completely different data, so "whose numbers are these" must never take a
+              click to answer. */}
+          <TenantBadge onOpenKeyEntry={() => setKeyEntryOpen(true)} />
         </div>
       </header>
+
+      <ExpiredKeyBanner />
 
       <main className="mx-auto flex w-full max-w-[1600px] grow flex-col px-6 sm:px-8 lg:px-12">
         <Routes>
           <Route path="/" element={<Landing />} />
-          <Route path="/reconcile" element={<ChooseSource />} />
+          <Route
+            path="/reconcile"
+            element={<ChooseSource onOpenKeyEntry={() => setKeyEntryOpen(true)} />}
+          />
           {(['test', 'upload'] as Mode[]).map((mode) => (
             <Route
               key={mode}
@@ -249,6 +265,7 @@ function Shell() {
       </main>
 
       {running && <RunProgress progress={progress} />}
+      <KeyEntryModal open={keyEntryOpen} onClose={() => setKeyEntryOpen(false)} />
     </div>
   )
 }
